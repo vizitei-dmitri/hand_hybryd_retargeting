@@ -1,0 +1,22 @@
+dg5f_retarget:
+  ros__parameters:
+    input_topic: /hands/right/landmarks
+    command_topic: /dg5f/joint_command
+    target_state_topic: /dg5f/target_joint_states
+    tracking_topic: /dg5f/tracking_ok
+    urdf_path: /workspace/models/dg5f/urdf/dg5f_right.urdf
+    retargeting_config: /workspace/src/dg5f_teleop/config/dg5f_hybrid.yaml
+    scaling_factor: 1.2
+    max_joint_velocity: 3.0
+    watchdog_timeout: 0.35
+    input_reliability: reliable
+    hybrid_dexpilot_config: /workspace/src/dg5f_teleop/config/dg5f_dexpilot.yaml
+    hybrid_contact_start: 0.055
+    hybrid_contact_full: 0.025
+    hybrid_max_blend: 0.80
+    hybrid_max_joint_correction: 0.45
+    hybrid_lateral_max_correction: 0.12
+    hybrid_correction_alpha: 0.35
+    hybrid_release_alpha: 0.18
+    prevent_distal_hyperextension: false
+    distal_flexion_min: 0.0

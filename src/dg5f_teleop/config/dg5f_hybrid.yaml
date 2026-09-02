@@ -1,0 +1,85 @@
+# Hybrid primary objective: Vector. DexPilot is used only near fingertip contact.
+retargeting:
+  type: Vector
+
+  # Overridden by the ROS launch file.  RetargetingConfig still requires this
+  # key to exist while it loads the YAML.
+  urdf_path: /workspace/models/dg5f/urdf/dg5f_right.urdf
+
+  target_joint_names:
+    - rj_dg_1_1
+    - rj_dg_1_2
+    - rj_dg_1_3
+    - rj_dg_1_4
+    - rj_dg_2_1
+    - rj_dg_2_2
+    - rj_dg_2_3
+    - rj_dg_2_4
+    - rj_dg_3_1
+    - rj_dg_3_2
+    - rj_dg_3_3
+    - rj_dg_3_4
+    - rj_dg_4_1
+    - rj_dg_4_2
+    - rj_dg_4_3
+    - rj_dg_4_4
+    - rj_dg_5_1
+    - rj_dg_5_2
+    - rj_dg_5_3
+    - rj_dg_5_4
+
+  # Four vectors per finger.  This uses all 21 Quest/MANO landmarks and
+  # constrains the intermediate phalanges instead of matching only fingertips.
+  target_origin_link_names:
+    - rl_dg_palm
+    - rl_dg_1_2
+    - rl_dg_1_3
+    - rl_dg_1_4
+    - rl_dg_palm
+    - rl_dg_2_2
+    - rl_dg_2_3
+    - rl_dg_2_4
+    - rl_dg_palm
+    - rl_dg_3_2
+    - rl_dg_3_3
+    - rl_dg_3_4
+    - rl_dg_palm
+    - rl_dg_4_2
+    - rl_dg_4_3
+    - rl_dg_4_4
+    - rl_dg_palm
+    - rl_dg_5_2
+    - rl_dg_5_3
+    - rl_dg_5_4
+
+  target_task_link_names:
+    - rl_dg_1_2
+    - rl_dg_1_3
+    - rl_dg_1_4
+    - rl_dg_1_tip
+    - rl_dg_2_2
+    - rl_dg_2_3
+    - rl_dg_2_4
+    - rl_dg_2_tip
+    - rl_dg_3_2
+    - rl_dg_3_3
+    - rl_dg_3_4
+    - rl_dg_3_tip
+    - rl_dg_4_2
+    - rl_dg_4_3
+    - rl_dg_4_4
+    - rl_dg_4_tip
+    - rl_dg_5_2
+    - rl_dg_5_3
+    - rl_dg_5_4
+    - rl_dg_5_tip
+
+  # wrist=0; thumb=1..4; index=5..8; middle=9..12;
+  # ring=13..16; little=17..20.
+  target_link_human_indices:
+    - [0, 1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11, 0, 13, 14, 15, 0, 17, 18, 19]
+    - [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+
+  scaling_factor: 1.0
+  low_pass_alpha: 0.2
+  has_joint_limits: true

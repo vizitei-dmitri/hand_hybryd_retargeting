@@ -1,0 +1,17 @@
+# Pinned because dex-retargeting 0.5.0 was released and tested against the
+# Pinocchio 3.x API. Newer pin 4.x releases are not assumed compatible here.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+numpy==2.2.6
+pin==3.4.0
+# Pinocchio 3.4 is linked against urdfdom 4.x. The unbounded transitive
+# dependency otherwise resolves to urdfdom 6.x and fails at import time.
+cmeel-urdfdom==4.0.1
+cmeel-tinyxml2==10.0.0
+nlopt==2.9.1
+# dex-retargeting imports its Torch backend during package initialization.
+# Use the CPU wheel: retargeting does not require CUDA and this keeps the image
+# portable across computers without an NVIDIA runtime.
+torch==2.5.1+cpu
+dex-retargeting==0.5.0
+mujoco==3.3.7

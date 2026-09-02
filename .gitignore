@@ -1,0 +1,13 @@
+/build/
+/install/
+/log/
+/bags/*
+!/bags/.gitkeep
+/.tools/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/

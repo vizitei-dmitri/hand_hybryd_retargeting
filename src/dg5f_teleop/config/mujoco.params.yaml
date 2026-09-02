@@ -1,0 +1,16 @@
+dg5f_mujoco:
+  ros__parameters:
+    model_path: /workspace/models/dg5f/scene_dg.xml
+    command_topic: /dg5f/joint_command
+    joint_state_topic: /dg5f/joint_states
+    control_hz: 200.0
+    state_publish_hz: 50.0
+    command_timeout: 0.5
+    # Tuned by replaying the live Quest pinch recording.  The source model's
+    # Kp=3 servos lagged by as much as 1.29 rad.
+    actuator_kp: 40.0
+    actuator_kd: 0.5
+    # DexPilot is not collision-aware.  Keep fingertip contacts but do not let
+    # unrelated phalanges block a requested pinch. Options: full/tip_only/off.
+    self_collision_mode: tip_only
+    render: true

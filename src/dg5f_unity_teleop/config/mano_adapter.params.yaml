@@ -1,0 +1,5 @@
+unity_mano_adapter:
+  ros__parameters:
+    input_topic: /quest/hand_pose
+    output_topic: /hands/right/landmarks
+    reliability: reliable
