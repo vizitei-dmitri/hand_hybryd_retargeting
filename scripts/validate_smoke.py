@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate all integration topics concurrently during the mock smoke test."""
 
+import argparse
 import sys
 import time
 
@@ -91,7 +92,43 @@ class SmokeValidator(Node):
             self.received.add("armed")
 
 
+class DisarmValidator(Node):
+    """Wait for the command watchdog to publish the disarmed state."""
+
+    def __init__(self) -> None:
+        super().__init__("dg5f_lerobot_disarm_validator")
+        self.disarmed = False
+        self.create_subscription(Bool, "/dg5f/lerobot/armed", self._armed, 10)
+
+    def _armed(self, message: Bool) -> None:
+        if not message.data:
+            self.disarmed = True
+
+
+def validate_disarmed() -> int:
+    rclpy.init()
+    node = DisarmValidator()
+    deadline = time.monotonic() + 3.0
+    try:
+        while time.monotonic() < deadline and not node.disarmed:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        if not node.disarmed:
+            print("Command watchdog did not disarm LeRobot output", file=sys.stderr)
+            return 1
+        print("Validated command-timeout disarm.")
+        return 0
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--expect-disarmed", action="store_true")
+    args = parser.parse_args()
+    if args.expect_disarmed:
+        return validate_disarmed()
+
     required = {
         "quest",
         "landmarks",

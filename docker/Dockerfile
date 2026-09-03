@@ -17,6 +17,8 @@ RUN apt-get update \
         build-essential \
         cmake \
         libeigen3-dev \
+        ninja-build \
+        pybind11-dev \
         python3-colcon-common-extensions \
         python3-dev \
         python3-pip \

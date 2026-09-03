@@ -1,6 +1,6 @@
 # DG5F LeRobot Retargeting
 
-Отдельная Docker-версия V2 для цепочки:
+Docker-версия V2 для цепочки:
 
 ```text
 Meta Quest 3 / RSL
@@ -9,15 +9,22 @@ Meta Quest 3 / RSL
 ROS-TCP-Endpoint -> 21 landmark -> Hybrid retargeting
                                       |
                                       v
-                          блокировка rj_dg_5_1
+                            /dg5f/joint_command
+                              raw target, radians
                                       |
-                         +------------+------------+
-                         |                         |
-                         v                         v
-                      MuJoCo              ROS -> LeRobot bridge
+                         +------------+-------------+
+                         |                          |
+                         v                          v
+                 MuJoCo visualization       ROS -> LeRobot adapter
                                                     |
                                                     v
-                                          Tesollo DG5F / DGSDK
+                                          PositionCommandShaper
+                                                    |
+                                                    v
+                                      dg5f_python -> DGSDK
+                                                    |
+                                                    v
+                                    MoveServoJoint -> physical DG5F
 ```
 
 Проект использует ROS 2 Humble, приложение
@@ -25,6 +32,10 @@ ROS-TCP-Endpoint -> 21 landmark -> Hybrid retargeting
 на Quest, ROS-TCP-Endpoint, Hybrid/Vector/DexPilot, MuJoCo и LeRobot `0.4.4`.
 Плагин `lerobot_robot_dg5f` реализует стандартный интерфейс LeRobot `Robot` и
 добавляет backend для Tesollo SDK. Локальный ROS на хосте не нужен.
+
+ROS здесь является message bus для Quest, ретаргетинга, MuJoCo и telemetry.
+Моторы не управляются через `ros2_control`: физическая кисть получает position
+setpoint напрямую через Python API `dg5f_python.set_target_position()`.
 
 ## Неисправный сустав мизинца
 
@@ -52,7 +63,7 @@ ROS-TCP-Endpoint -> 21 landmark -> Hybrid retargeting
 ## Структура
 
 ```text
-hand_lerobot_retargeting/
+hand_hybryd_retargeting/
 ├── compose.yaml
 ├── docker/                         # автономный ROS 2 + LeRobot образ
 ├── models/dg5f/                    # модель и mesh-файлы DG5F
@@ -60,7 +71,7 @@ hand_lerobot_retargeting/
 ├── src/
 │   ├── dg5f_teleop/                # Hybrid/Vector/DexPilot и MuJoCo
 │   ├── dg5f_unity_teleop/          # RSL adapter и общий launch
-│   ├── lerobot_robot_dg5f/         # LeRobot Robot + ROS bridge
+│   ├── lerobot_robot_dg5f/         # Robot, command shaper и ROS bridge
 │   ├── ros_tcp_endpoint/
 │   └── vr_haptic_msgs/
 └── vendor/tesollo_control/         # DGSDK и Python-обёртка
@@ -78,13 +89,13 @@ hand_lerobot_retargeting/
 
 ```bash
 sudo apt update
-sudo apt install adb curl x11-xserver-utils
+sudo apt install adb curl netcat-openbsd x11-xserver-utils
 ```
 
 ## Первая сборка и автоматическая проверка
 
 ```bash
-cd /home/yoba/Documents/work/hand_lerobot_retargeting
+cd /home/yoba/Documents/work/hand_hybryd_retargeting
 bash scripts/stack.sh setup
 bash scripts/stack.sh lerobot-check
 ```
@@ -139,10 +150,12 @@ bash scripts/stack.sh launch 10000 dexpilot
 
 ## Запуск физической DG5F
 
-Сначала проверьте сеть, не включая привод:
+Сначала закройте DGManager, старые драйверы и другие процессы, подключённые к
+кисти. Затем проверьте сеть, не отправляя команд движения:
 
 ```bash
 ping -c 3 169.254.186.72
+nc -vz -w 3 169.254.186.72 502
 ip -brief address
 ```
 
@@ -153,23 +166,34 @@ ip -brief address
 sudo ip address add 169.254.186.73/16 dev ИМЯ_ETHERNET_ИНТЕРФЕЙСА
 ```
 
+Можно отдельно проверить импорт SDK и прочитать 20 суставов. `sdk-check` не
+вызывает `set_target_position`:
+
+```bash
+bash scripts/stack.sh sdk-check 169.254.186.72
+```
+
 Положите кисть в безопасное положение, освободите рабочую область и запустите:
 
 ```bash
 bash scripts/stack.sh hardware 10000 hybrid 169.254.186.72
 ```
 
-Этот режим подключает настоящий backend, но оставляет передачу движения
-`DISARMED`. В другом терминале проверьте состояние:
+Этот режим подключает настоящий backend, ждёт свежую начальную позицию, но
+оставляет передачу движения `DISARMED`. Если позицию получить не удалось за
+`2 s`, hardware backend завершится и включить движение будет невозможно. В
+другом терминале проверьте состояние:
 
 ```bash
-cd /home/yoba/Documents/work/hand_lerobot_retargeting
+cd /home/yoba/Documents/work/hand_hybryd_retargeting
 bash scripts/stack.sh shell
 source /workspace/install/setup.bash
 ros2 topic echo /dg5f/lerobot/connected --once
 ros2 topic echo /dg5f/lerobot/armed --once
 ros2 topic echo /dg5f/tracking_ok --once
 ros2 topic echo /dg5f/joint_command --once
+ros2 topic echo /dg5f/lerobot/commanded_joint_states --once
+ros2 topic echo /dg5f/lerobot/joint_states --once
 ```
 
 Перед включением ожидается:
@@ -217,6 +241,12 @@ bash scripts/stack.sh hardware-headless 10000 hybrid 169.254.186.72
 | `/dg5f/lerobot/armed` | разрешена ли передача движения |
 | `/dg5f/lerobot/enable` | сервис `std_srvs/SetBool` для arm/disarm |
 
+`/dg5f/joint_command` показывает raw-результат ретаргетинга, MuJoCo следует
+ему напрямую. `/dg5f/lerobot/commanded_joint_states` показывает сглаженный
+setpoint, реально принятый physical/mock backend. `/dg5f/lerobot/joint_states`
+содержит измеренную позицию и скорость. Поле `JointState.effort` содержит
+telemetry тока мотора, а не рассчитанный torque.
+
 ## Использование как LeRobot-плагина
 
 Имя пакета следует соглашению сторонних плагинов LeRobot —
@@ -237,13 +267,71 @@ robot.connect()
 observation = robot.get_observation()
 action = {f"rj_dg_{finger}_{joint}.pos": 0.0
           for finger in range(1, 6) for joint in range(1, 5)}
-robot.send_action(action)
+effective_action = robot.send_action(action)
 robot.disconnect()
 ```
+
+Для прямого доступа к реальной кисти создайте ту же реализацию с hardware
+backend. `connect()` только запускает SDK и получает initial feedback; первое
+движение начинается при первом `send_action()`, поэтому прямой API должен иметь
+внешний safety gate пользователя:
+
+```python
+robot = Dg5f(Dg5fConfig(
+    id="dg5f_real",
+    backend="tesollo",
+    ip="169.254.186.72",
+    port=502,
+    slave_id=1,
+))
+robot.connect()
+# После ручной проверки рабочей области:
+effective_action = robot.send_action(action)
+observation = robot.get_observation()
+robot.disconnect()
+```
+
+`send_action()` возвращает effective action после joint limits, fault map,
+фильтрации и динамических ограничений. Это именно setpoint, принятый backend,
+а не исходный target. Observation содержит измеренные position, velocity,
+motor current и temperature; feedback не перезаписывает внутреннюю command
+trajectory. Такое разделение подходит для будущего LeRobot dataset:
+`action=effective command`, `observation=measured state`.
 
 Пакет готов как hardware plugin и ROS action bridge. Для полноценного запуска
 `lerobot-record` отдельно задаются камеры и источник действий: teleoperator,
 policy или адаптер ROS-команды.
+
+## Position command shaper
+
+Основная realtime-логика находится в
+`src/lerobot_robot_dg5f/lerobot_robot_dg5f/command_shaper.py`, а не в ROS
+bridge. Поэтому одинаковое поведение получают ROS, прямой LeRobot API,
+teleoperator и будущая policy.
+
+После соединения shaper один раз инициализируется свежей фактической позицией.
+Дальше authoritative state — его собственные `command_pose_deg`,
+`velocity_deg_s` и `last_sent_pose_deg`. Асинхронный measured feedback
+используется только для observation и диагностики.
+
+| Параметр | По умолчанию |
+|---|---:|
+| `command_rate_hz` | `50 Hz` |
+| `max_speed_deg_s` | `30 deg/s` |
+| `max_accel_deg_s2` | `60 deg/s²` |
+| `response_time_s` | `0.15 s` |
+| `filter_tau_s` | `0.05 s` |
+| `target_deadband_deg` | `0.20 deg` |
+| `min_send_step_deg` | `0.20 deg` |
+| `max_dt_s` | `0.05 s` |
+| `initial_feedback_timeout_s` | `2.0 s` |
+| `telemetry_drain_limit` | `16 samples` |
+
+Параметры находятся в
+`src/lerobot_robot_dg5f/config/bridge.params.yaml`. Старый
+`max_relative_target_deg` оставлен только для совместимости конфигурации и
+больше не является механизмом сглаживания. Mock проходит через тот же shaper,
+что и реальная кисть.
 
 ## Настройка Hybrid
 

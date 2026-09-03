@@ -16,6 +16,17 @@ from dg5f_teleop.constants import ACTUATOR_NAMES, JOINT_NAMES
 SELF_COLLISION_MODES = ("full", "tip_only", "off")
 
 
+def enforce_fixed_joint_state(
+    data: mujoco.MjData,
+    qpos_addresses: np.ndarray,
+    qvel_addresses: np.ndarray,
+    positions: np.ndarray,
+) -> None:
+    """Keep mechanically unavailable joints fixed in the digital twin."""
+    data.qpos[np.asarray(qpos_addresses, dtype=np.int64)] = positions
+    data.qvel[np.asarray(qvel_addresses, dtype=np.int64)] = 0.0
+
+
 def configure_position_actuators(
     model: mujoco.MjModel,
     actuator_ids: np.ndarray,
@@ -94,6 +105,8 @@ class MujocoBridgeNode(Node):
         self.declare_parameter("actuator_kp", 40.0)
         self.declare_parameter("actuator_kd", 0.5)
         self.declare_parameter("self_collision_mode", "tip_only")
+        self.declare_parameter("fixed_joints", ["rj_dg_5_1"])
+        self.declare_parameter("fixed_joint_positions", [0.0])
         self.declare_parameter("render", True)
 
         model_path = Path(str(self.get_parameter("model_path").value))
@@ -113,6 +126,27 @@ class MujocoBridgeNode(Node):
         self._qvel_addresses = self._model.jnt_dofadr[self._joint_ids]
         self._ctrl_limits = self._model.actuator_ctrlrange[self._actuator_ids].copy()
 
+        fixed_names = list(self.get_parameter("fixed_joints").value)
+        fixed_positions = np.asarray(
+            self.get_parameter("fixed_joint_positions").value,
+            dtype=np.float64,
+        )
+        if len(fixed_names) != len(fixed_positions):
+            raise ValueError(
+                "fixed_joints and fixed_joint_positions must have equal length"
+            )
+        unknown_fixed = [name for name in fixed_names if name not in JOINT_NAMES]
+        if unknown_fixed:
+            raise ValueError(f"Unknown fixed DG5F joints: {unknown_fixed}")
+        if not np.all(np.isfinite(fixed_positions)):
+            raise ValueError("Fixed DG5F positions must be finite")
+        self._fixed_indices = np.asarray(
+            [JOINT_NAMES.index(name) for name in fixed_names], dtype=np.int64
+        )
+        self._fixed_positions = fixed_positions
+        self._fixed_qpos_addresses = self._qpos_addresses[self._fixed_indices]
+        self._fixed_qvel_addresses = self._qvel_addresses[self._fixed_indices]
+
         actuator_kp = float(self.get_parameter("actuator_kp").value)
         actuator_kd = float(self.get_parameter("actuator_kd").value)
         configure_position_actuators(
@@ -126,6 +160,13 @@ class MujocoBridgeNode(Node):
         )
 
         self._target = self._data.qpos[self._qpos_addresses].copy()
+        self._target[self._fixed_indices] = self._fixed_positions
+        enforce_fixed_joint_state(
+            self._data,
+            self._fixed_qpos_addresses,
+            self._fixed_qvel_addresses,
+            self._fixed_positions,
+        )
         self._last_command_time: Optional[float] = None
         self._timeout_reported = False
 
@@ -221,6 +262,7 @@ class MujocoBridgeNode(Node):
             self._ctrl_limits[:, 0],
             self._ctrl_limits[:, 1],
         )
+        self._target[self._fixed_indices] = self._fixed_positions
         self._last_command_time = self._now_seconds()
         self._timeout_reported = False
 
@@ -235,7 +277,20 @@ class MujocoBridgeNode(Node):
                     self._timeout_reported = True
 
         self._data.ctrl[self._actuator_ids] = self._target
+        enforce_fixed_joint_state(
+            self._data,
+            self._fixed_qpos_addresses,
+            self._fixed_qvel_addresses,
+            self._fixed_positions,
+        )
         mujoco.mj_step(self._model, self._data, nstep=self._physics_substeps)
+        enforce_fixed_joint_state(
+            self._data,
+            self._fixed_qpos_addresses,
+            self._fixed_qvel_addresses,
+            self._fixed_positions,
+        )
+        mujoco.mj_forward(self._model, self._data)
         self._control_count += 1
 
         if self._control_count % self._state_publish_every == 0:

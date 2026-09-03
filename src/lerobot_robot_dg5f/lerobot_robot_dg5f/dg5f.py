@@ -1,12 +1,14 @@
 """LeRobot ``Robot`` implementation for the Tesollo DG5F hand."""
 
 from functools import cached_property
+from typing import Callable
 
 import numpy as np
 from lerobot.processor import RobotAction, RobotObservation
 from lerobot.robots import Robot
 
 from .backends import MockDg5fBackend, TesolloDg5fBackend
+from .command_shaper import PositionCommandShaper
 from .config_dg5f import Dg5fConfig
 from .constants import (
     JOINT_NAMES,
@@ -43,7 +45,12 @@ class Dg5f(Robot):
     config_class = Dg5fConfig
     name = "dg5f"
 
-    def __init__(self, config: Dg5fConfig):
+    def __init__(
+        self,
+        config: Dg5fConfig,
+        *,
+        clock: Callable[[], float] | None = None,
+    ):
         super().__init__(config)
         self.config = config
         if config.backend == "tesollo":
@@ -56,12 +63,33 @@ class Dg5f(Robot):
             field: np.zeros(len(JOINT_NAMES), dtype=np.float64)
             for field in TELEMETRY_FIELDS
         }
-        self._last_sent_deg = np.zeros(len(JOINT_NAMES), dtype=np.float64)
 
         # Validate the fault map immediately, before any hardware connection.
-        apply_disabled_joints(
-            self._last_sent_deg, self.config.disabled_joint_positions_deg
+        initial = apply_disabled_joints(
+            np.zeros(len(JOINT_NAMES)), self.config.disabled_joint_positions_deg
         )
+        disabled_by_index = {
+            JOINT_NAMES.index(name): float(position)
+            for name, position in self.config.disabled_joint_positions_deg.items()
+        }
+        shaper_kwargs = {}
+        if clock is not None:
+            shaper_kwargs["clock"] = clock
+        self.command_shaper = PositionCommandShaper(
+            LOWER_LIMITS_DEG,
+            UPPER_LIMITS_DEG,
+            disabled_positions_deg=disabled_by_index,
+            smoothing=config.control_smoothing,
+            max_speed_deg_s=config.max_speed_deg_s,
+            max_accel_deg_s2=config.max_accel_deg_s2,
+            response_time_s=config.response_time_s,
+            filter_tau_s=config.filter_tau_s,
+            target_deadband_deg=config.target_deadband_deg,
+            min_send_step_deg=config.min_send_step_deg,
+            max_dt_s=config.max_dt_s,
+            **shaper_kwargs,
+        )
+        self._telemetry["pos"] = initial
 
     @cached_property
     def observation_features(self) -> dict[str, type]:
@@ -80,16 +108,23 @@ class Dg5f(Robot):
         return self.backend.is_connected
 
     def connect(self, calibrate: bool = True) -> None:
+        del calibrate
         if self.is_connected:
             return
         self.backend.connect()
-        telemetry = self.backend.read_telemetry()
-        if telemetry.get("pos") is not None:
-            self._telemetry["pos"] = telemetry["pos"]
-            self._last_sent_deg = telemetry["pos"].copy()
-        self._last_sent_deg = apply_disabled_joints(
-            self._last_sent_deg, self.config.disabled_joint_positions_deg
-        )
+        try:
+            initial = self.backend.read_initial_position(
+                self.config.initial_feedback_timeout_s,
+                self.config.telemetry_drain_limit,
+            )
+            initial = apply_disabled_joints(
+                initial, self.config.disabled_joint_positions_deg
+            )
+            self._telemetry["pos"] = initial.copy()
+            self.command_shaper.reset(initial)
+        except Exception:
+            self.backend.disconnect()
+            raise
         self.configure()
 
     @property
@@ -105,7 +140,7 @@ class Dg5f(Robot):
     def get_observation(self) -> RobotObservation:
         if not self.is_connected:
             raise RuntimeError("DG5F is not connected")
-        fresh = self.backend.read_telemetry()
+        fresh = self.backend.read_telemetry(self.config.telemetry_drain_limit)
         for field in TELEMETRY_FIELDS:
             values = fresh.get(field)
             if values is not None:
@@ -135,24 +170,20 @@ class Dg5f(Robot):
         if not np.all(np.isfinite(requested)):
             raise ValueError("DG5F action contains NaN or infinity")
 
-        safe = np.clip(requested, LOWER_LIMITS_DEG, UPPER_LIMITS_DEG)
-        max_step = self.config.max_relative_target_deg
-        if max_step is not None:
-            safe = np.clip(
-                safe,
-                self._last_sent_deg - max_step,
-                self._last_sent_deg + max_step,
-            )
-        safe = apply_disabled_joints(
-            safe, self.config.disabled_joint_positions_deg
-        )
-
-        self.backend.send_positions(safe)
-        self._last_sent_deg = safe
+        step = self.command_shaper.step(requested)
+        if step.should_send:
+            self.backend.send_positions(step.output_deg)
+            self.command_shaper.accept_output(step.output_deg)
+        effective = self.command_shaper.effective_command()
         return {
-            f"{joint}.pos": float(safe[index])
+            f"{joint}.pos": float(effective[index])
             for index, joint in enumerate(JOINT_NAMES)
         }
+
+    def hold_position(self) -> None:
+        """Cancel internal motion without sending any new hardware setpoint."""
+        if self.command_shaper.is_initialized:
+            self.command_shaper.hold()
 
     def disconnect(self) -> None:
         if self.is_connected:

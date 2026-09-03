@@ -23,18 +23,32 @@ def test_disabled_pinky_base_is_always_zero():
 
 
 def test_mock_robot_clips_steps_limits_and_broken_joint():
-    robot = Dg5f(Dg5fConfig(id="test", backend="mock", max_relative_target_deg=7.0))
+    robot = Dg5f(
+        Dg5fConfig(
+            id="test",
+            backend="mock",
+            control_smoothing=False,
+            min_send_step_deg=0.0,
+        )
+    )
     robot.connect()
     sent = robot.send_action(complete_action(200.0))
 
     values = np.asarray([sent[f"{joint}.pos"] for joint in JOINT_NAMES])
-    assert np.all(values <= np.minimum(UPPER_LIMITS_DEG, 7.0))
+    assert np.all(values <= UPPER_LIMITS_DEG)
     assert values[BROKEN_PINKY_INDEX] == 0.0
     robot.disconnect()
 
 
 def test_mock_observation_uses_lerobot_feature_contract():
-    robot = Dg5f(Dg5fConfig(id="test", backend="mock"))
+    robot = Dg5f(
+        Dg5fConfig(
+            id="test",
+            backend="mock",
+            control_smoothing=False,
+            min_send_step_deg=0.0,
+        )
+    )
     robot.connect()
     robot.send_action(complete_action(1.0))
     observation = robot.get_observation()

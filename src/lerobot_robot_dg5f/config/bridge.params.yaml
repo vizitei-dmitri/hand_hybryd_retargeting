@@ -12,9 +12,20 @@ dg5f_lerobot_bridge:
     ip: 169.254.186.72
     port: 502
     slave_id: 1
-    command_rate_hz: 60.0
+    command_rate_hz: 50.0
     state_rate_hz: 30.0
     command_timeout: 0.35
+    control_smoothing: true
+    max_speed_deg_s: 30.0
+    max_accel_deg_s2: 60.0
+    response_time_s: 0.15
+    filter_tau_s: 0.05
+    target_deadband_deg: 0.20
+    min_send_step_deg: 0.20
+    max_dt_s: 0.05
+    initial_feedback_timeout_s: 2.0
+    telemetry_drain_limit: 16
+    # Deprecated compatibility option; no longer used for smoothing.
     max_relative_target_deg: 7.0
     auto_enable: false
     require_tracking: true

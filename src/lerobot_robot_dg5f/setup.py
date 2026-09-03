@@ -24,10 +24,10 @@ setup(
     maintainer_email="maintainer@example.com",
     description="LeRobot plugin and ROS 2 bridge for the Tesollo DG5F hand",
     license="MIT",
-    tests_require=["pytest"],
     entry_points={
         "console_scripts": [
             "ros_bridge = lerobot_robot_dg5f.ros_bridge_node:main",
+            "sdk_check = lerobot_robot_dg5f.sdk_check:main",
         ],
     },
 )

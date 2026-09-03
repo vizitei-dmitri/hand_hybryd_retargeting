@@ -13,4 +13,7 @@ dg5f_mujoco:
     # DexPilot is not collision-aware.  Keep fingertip contacts but do not let
     # unrelated phalanges block a requested pinch. Options: full/tip_only/off.
     self_collision_mode: tip_only
+    # Match the known physical fault in the digital twin, including passive drift.
+    fixed_joints: [rj_dg_5_1]
+    fixed_joint_positions: [0.0]
     render: true

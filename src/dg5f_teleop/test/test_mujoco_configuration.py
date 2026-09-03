@@ -13,6 +13,12 @@ class _Model:
         self.geom_conaffinity = np.ones(5, dtype=int)
 
 
+class _Data:
+    def __init__(self):
+        self.qpos = np.arange(6, dtype=float)
+        self.qvel = np.arange(6, dtype=float)
+
+
 def test_configure_position_actuators_sets_affine_pd_coefficients():
     model = _Model()
 
@@ -66,3 +72,17 @@ def test_full_collision_does_not_change_model():
 def test_invalid_collision_mode_is_rejected():
     with pytest.raises(ValueError, match="self_collision_mode"):
         bridge.configure_hand_self_collision(_Model(), "sometimes")
+
+
+def test_fixed_joint_state_eliminates_position_and_velocity_drift():
+    data = _Data()
+
+    bridge.enforce_fixed_joint_state(
+        data,
+        qpos_addresses=np.array([3]),
+        qvel_addresses=np.array([4]),
+        positions=np.array([0.0]),
+    )
+
+    assert data.qpos[3] == 0.0
+    assert data.qvel[4] == 0.0

@@ -1,5 +1,6 @@
-"""ROS 2 JointTrajectory bridge to the DG5F LeRobot plugin."""
+"""ROS transport, watchdog and arming bridge to the DG5F LeRobot plugin."""
 
+import time
 from typing import Optional
 
 import numpy as np
@@ -32,6 +33,17 @@ def trajectory_to_degrees(message: JointTrajectory) -> np.ndarray:
     return np.rad2deg(radians)
 
 
+def command_is_fresh(
+    last_command_time: Optional[float], now: float, timeout: float
+) -> bool:
+    """Return whether a valid target is recent enough for hardware output."""
+    return (
+        last_command_time is not None
+        and timeout > 0.0
+        and 0.0 <= now - last_command_time <= timeout
+    )
+
+
 class Dg5fLeRobotBridge(Node):
     """Rate-limited and explicitly armed bridge to a LeRobot ``Dg5f``."""
 
@@ -52,9 +64,20 @@ class Dg5fLeRobotBridge(Node):
         self.declare_parameter("ip", "169.254.186.72")
         self.declare_parameter("port", 502)
         self.declare_parameter("slave_id", 1)
-        self.declare_parameter("command_rate_hz", 60.0)
+        self.declare_parameter("command_rate_hz", 50.0)
         self.declare_parameter("state_rate_hz", 30.0)
         self.declare_parameter("command_timeout", 0.35)
+        self.declare_parameter("control_smoothing", True)
+        self.declare_parameter("max_speed_deg_s", 30.0)
+        self.declare_parameter("max_accel_deg_s2", 60.0)
+        self.declare_parameter("response_time_s", 0.15)
+        self.declare_parameter("filter_tau_s", 0.05)
+        self.declare_parameter("target_deadband_deg", 0.20)
+        self.declare_parameter("min_send_step_deg", 0.20)
+        self.declare_parameter("max_dt_s", 0.05)
+        self.declare_parameter("initial_feedback_timeout_s", 2.0)
+        self.declare_parameter("telemetry_drain_limit", 16)
+        # Kept only so old launch/config invocations do not fail.
         self.declare_parameter("max_relative_target_deg", 7.0)
         self.declare_parameter("auto_enable", False)
         self.declare_parameter("require_tracking", True)
@@ -62,6 +85,7 @@ class Dg5fLeRobotBridge(Node):
         self.declare_parameter("disabled_positions_deg", [0.0])
 
         backend = str(self.get_parameter("backend").value).lower()
+        self._backend_name = backend
         auto_enable = bool(self.get_parameter("auto_enable").value)
         if backend == "tesollo" and auto_enable:
             raise ValueError("auto_enable is forbidden for the real Tesollo backend")
@@ -82,6 +106,32 @@ class Dg5fLeRobotBridge(Node):
             ip=str(self.get_parameter("ip").value),
             port=int(self.get_parameter("port").value),
             slave_id=int(self.get_parameter("slave_id").value),
+            control_smoothing=bool(
+                self.get_parameter("control_smoothing").value
+            ),
+            max_speed_deg_s=float(
+                self.get_parameter("max_speed_deg_s").value
+            ),
+            max_accel_deg_s2=float(
+                self.get_parameter("max_accel_deg_s2").value
+            ),
+            response_time_s=float(
+                self.get_parameter("response_time_s").value
+            ),
+            filter_tau_s=float(self.get_parameter("filter_tau_s").value),
+            target_deadband_deg=float(
+                self.get_parameter("target_deadband_deg").value
+            ),
+            min_send_step_deg=float(
+                self.get_parameter("min_send_step_deg").value
+            ),
+            max_dt_s=float(self.get_parameter("max_dt_s").value),
+            initial_feedback_timeout_s=float(
+                self.get_parameter("initial_feedback_timeout_s").value
+            ),
+            telemetry_drain_limit=int(
+                self.get_parameter("telemetry_drain_limit").value
+            ),
             max_relative_target_deg=float(
                 self.get_parameter("max_relative_target_deg").value
             ),
@@ -146,7 +196,7 @@ class Dg5fLeRobotBridge(Node):
         )
 
     def _now_seconds(self) -> float:
-        return self.get_clock().now().nanoseconds * 1e-9
+        return time.monotonic()
 
     def _warn_throttled(self, text: str) -> None:
         now = self._now_seconds()
@@ -163,9 +213,17 @@ class Dg5fLeRobotBridge(Node):
 
     def _on_tracking(self, message: Bool) -> None:
         self._tracking_ok = bool(message.data)
+        if not self._tracking_ok:
+            self._robot.hold_position()
+        if not self._tracking_ok and self._backend_name == "tesollo":
+            self._armed = False
 
     def _on_enable(self, request: SetBool.Request, response: SetBool.Response):
         if request.data:
+            if not self._robot.is_connected:
+                response.success = False
+                response.message = "DG5F backend is not connected"
+                return response
             if self._latest_command_deg is None:
                 response.success = False
                 response.message = "No valid DG5F command has been received"
@@ -177,7 +235,16 @@ class Dg5fLeRobotBridge(Node):
                 response.success = False
                 response.message = "Hand tracking is not healthy"
                 return response
+            timeout = float(self.get_parameter("command_timeout").value)
+            if not command_is_fresh(
+                self._last_command_time, self._now_seconds(), timeout
+            ):
+                response.success = False
+                response.message = "Latest DG5F command is stale"
+                return response
         self._armed = bool(request.data)
+        if not self._armed:
+            self._robot.hold_position()
         response.success = True
         response.message = "DG5F output enabled" if self._armed else "DG5F output disabled"
         self.get_logger().warning(response.message)
@@ -189,11 +256,11 @@ class Dg5fLeRobotBridge(Node):
         if bool(self.get_parameter("require_tracking").value) and not self._tracking_ok:
             return
         timeout = float(self.get_parameter("command_timeout").value)
-        if (
-            self._last_command_time is None
-            or self._now_seconds() - self._last_command_time > timeout
+        if not command_is_fresh(
+            self._last_command_time, self._now_seconds(), timeout
         ):
             self._armed = False
+            self._robot.hold_position()
             self._warn_throttled("Command timeout: LeRobot output was disarmed")
             return
 
@@ -205,6 +272,7 @@ class Dg5fLeRobotBridge(Node):
             sent = self._robot.send_action(action)
         except Exception as error:
             self._armed = False
+            self._robot.hold_position()
             self.get_logger().error(f"LeRobot command failed; output disarmed: {error}")
             return
         self._publish_commanded_state(sent)

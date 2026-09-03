@@ -71,5 +71,7 @@ client_pid=$!
 python3 /workspace/scripts/validate_smoke.py
 wait "${client_pid}"
 client_pid=""
+sleep 0.6
+python3 /workspace/scripts/validate_smoke.py --expect-disarmed
 
 echo "LeRobot smoke passed: TCP/CDR -> Mano[21] -> Hybrid -> fault map -> MuJoCo + LeRobot."

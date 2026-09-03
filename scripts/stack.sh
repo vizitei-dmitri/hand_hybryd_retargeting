@@ -43,6 +43,7 @@ Commands:
                  Start the real backend without the MuJoCo window (disarmed)
   arm            Enable real motion after tracking and command checks
   disarm         Stop forwarding new commands to the physical hand
+  sdk-check [ip] Connect and read 20 positions without sending a command
   lerobot-check  Verify LeRobot plugin discovery and its action schema
   endpoint [port]
                  Start only ROS-TCP-Endpoint for connection diagnostics
@@ -157,6 +158,13 @@ case "${1:-help}" in
     fi
     "${compose[@]}" exec "${service}" bash -lc \
       "${source_workspace}; ros2 service call /dg5f/lerobot/enable std_srvs/srv/SetBool '{data: ${enable}}'"
+    ;;
+  sdk-check)
+    require_container
+    hand_ip="${2:-${DG5F_HAND_IP:-169.254.186.72}}"
+    echo "Read-only DG5F SDK check at ${hand_ip}:502 (no target is sent)."
+    "${compose[@]}" exec "${service}" bash -lc \
+      "${source_workspace}; ros2 run lerobot_robot_dg5f sdk_check --ip ${hand_ip} --port 502 --slave-id 1"
     ;;
   lerobot-check)
     require_container

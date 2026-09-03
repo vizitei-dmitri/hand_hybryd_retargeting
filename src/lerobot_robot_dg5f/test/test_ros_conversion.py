@@ -3,7 +3,10 @@ import pytest
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from lerobot_robot_dg5f.constants import JOINT_NAMES
-from lerobot_robot_dg5f.ros_bridge_node import trajectory_to_degrees
+from lerobot_robot_dg5f.ros_bridge_node import (
+    command_is_fresh,
+    trajectory_to_degrees,
+)
 
 
 def test_named_trajectory_is_reordered_and_converted_to_degrees():
@@ -25,3 +28,10 @@ def test_incomplete_trajectory_is_rejected():
 
     with pytest.raises(ValueError, match="missing"):
         trajectory_to_degrees(message)
+
+
+def test_command_timeout_freshness():
+    assert command_is_fresh(10.0, 10.34, 0.35)
+    assert not command_is_fresh(10.0, 10.36, 0.35)
+    assert not command_is_fresh(None, 10.0, 0.35)
+    assert not command_is_fresh(11.0, 10.0, 0.35)
