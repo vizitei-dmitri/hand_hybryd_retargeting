@@ -20,3 +20,7 @@ dg5f_retarget:
     hybrid_release_alpha: 0.18
     prevent_distal_hyperextension: false
     distal_flexion_min: 0.0
+    # Physical prototype fault: first pinky joint (SDK index 16) is unavailable.
+    # This is applied to both /dg5f/joint_command and the MuJoCo digital twin.
+    fixed_joints: [rj_dg_5_1]
+    fixed_joint_positions: [0.0]

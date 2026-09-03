@@ -1,0 +1,22 @@
+dg5f_lerobot_bridge:
+  ros__parameters:
+    command_topic: /dg5f/joint_command
+    tracking_topic: /dg5f/tracking_ok
+    joint_state_topic: /dg5f/lerobot/joint_states
+    commanded_state_topic: /dg5f/lerobot/commanded_joint_states
+    temperature_topic: /dg5f/lerobot/temperatures
+    connected_topic: /dg5f/lerobot/connected
+    armed_topic: /dg5f/lerobot/armed
+    enable_service: /dg5f/lerobot/enable
+    backend: mock
+    ip: 169.254.186.72
+    port: 502
+    slave_id: 1
+    command_rate_hz: 60.0
+    state_rate_hz: 30.0
+    command_timeout: 0.35
+    max_relative_target_deg: 7.0
+    auto_enable: false
+    require_tracking: true
+    disabled_joints: [rj_dg_5_1]
+    disabled_positions_deg: [0.0]

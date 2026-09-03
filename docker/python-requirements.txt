@@ -9,9 +9,11 @@ pin==3.4.0
 cmeel-urdfdom==4.0.1
 cmeel-tinyxml2==10.0.0
 nlopt==2.9.1
-# dex-retargeting imports its Torch backend during package initialization.
-# Use the CPU wheel: retargeting does not require CUDA and this keeps the image
-# portable across computers without an NVIDIA runtime.
-torch==2.5.1+cpu
+# A coherent CPU-only set supported by LeRobot 0.4.4. CUDA is not required for
+# the bridge or retargeting and would make the image hardware-specific.
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
+torchcodec==0.10.0
 dex-retargeting==0.5.0
 mujoco==3.3.7
+lerobot==0.4.4

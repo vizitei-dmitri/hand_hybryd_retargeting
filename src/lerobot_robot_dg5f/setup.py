@@ -1,10 +1,9 @@
 from glob import glob
-import os
 
 from setuptools import find_packages, setup
 
 
-package_name = "dg5f_unity_teleop"
+package_name = "lerobot_robot_dg5f"
 
 
 setup(
@@ -17,20 +16,18 @@ setup(
             ["resource/" + package_name],
         ),
         ("share/" + package_name, ["package.xml"]),
-        (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
-        (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
+        ("share/" + package_name + "/config", glob("config/*.yaml")),
     ],
-    install_requires=["setuptools"],
+    install_requires=["setuptools", "lerobot==0.4.4"],
     zip_safe=True,
-    maintainer="hand workspace maintainer",
+    maintainer="DG5F workspace maintainer",
     maintainer_email="maintainer@example.com",
-    description="Unity Quest adapter and DG5F MuJoCo/LeRobot launch",
-    license="Apache-2.0",
+    description="LeRobot plugin and ROS 2 bridge for the Tesollo DG5F hand",
+    license="MIT",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "mano_adapter = dg5f_unity_teleop.mano_adapter_node:main",
-            "fake_mano = dg5f_unity_teleop.fake_mano_node:main",
+            "ros_bridge = lerobot_robot_dg5f.ros_bridge_node:main",
         ],
     },
 )

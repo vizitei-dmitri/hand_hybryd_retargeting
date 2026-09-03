@@ -1,7 +1,7 @@
 # Third-party components
 
-This snapshot contains the minimum third-party source and model files required
-to run the V2 pipeline.
+This snapshot contains the third-party source, model and runtime components
+required to run the V2 LeRobot pipeline.
 
 ## ROS-TCP-Endpoint
 
@@ -26,8 +26,30 @@ to run the V2 pipeline.
 - The retained upstream notice is at `models/dg5f/UPSTREAM.md`.
 - Local fix: URDF mesh paths resolve against the included assets directory.
 
+## Tesollo DG5F control wrapper and DGSDK
+
+- Source snapshot: local `tesollo_control` checkout based on revision
+  `1ce62601d90dc8dbea5010ba9748b67f71517a16`.
+- Included at: `vendor/tesollo_control`.
+- Python distribution: `dg5f-python==1.0`, built inside the Docker image.
+- The upstream license and notices are retained in the vendor directory.
+- `libDGSDK.so` is a prebuilt vendor library and remains subject to Tesollo's
+  distribution terms.
+- Local safety change: command element `16` (`rj_dg_5_1`) is held at zero to
+  mirror the known hardware fault.
+
+## LeRobot
+
+- Upstream: <https://github.com/huggingface/lerobot>
+- Installed version: `0.4.4` from PyPI.
+- License: Apache-2.0.
+- Local integration: `src/lerobot_robot_dg5f` implements a third-party
+  `Robot` plugin and a ROS 2 command/state bridge; the upstream source is not
+  vendored.
+
 ## Runtime Python packages
 
 Pinned versions are in `docker/python-requirements.txt`, including
-`dex-retargeting==0.5.0`, `mujoco==3.3.7`, `pin==3.4.0` and `numpy==2.2.6`.
-They are downloaded during the Docker build and their own licenses apply.
+`lerobot==0.4.4`, `dex-retargeting==0.5.0`, `mujoco==3.3.7`, `pin==3.4.0`
+and `numpy==2.2.6`. They are downloaded during the Docker build and their own
+licenses apply.

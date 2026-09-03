@@ -15,7 +15,7 @@ export RENDER_GID="${RENDER_GID:-${render_gid:-${HOST_GID}}}"
 export DISPLAY="${DISPLAY:-:0}"
 
 compose=(docker compose -f "${compose_file}")
-service=hybrid_hand
+service=lerobot_hand
 source_workspace='source /opt/ros/humble/setup.bash; source /workspace/install/setup.bash'
 
 show_help() {
@@ -26,17 +26,24 @@ Commands:
   setup          Build image, start container, compile, test and smoke-test
   build          Build/rebuild the standalone Docker image
   up             Start the background container
-  compile        Build all four ROS 2 packages
+  compile        Build all five ROS 2 packages
   test           Run package tests
-  smoke          Offline TCP -> Hybrid -> MuJoCo integration test
+  smoke          Offline TCP -> Hybrid -> MuJoCo + LeRobot mock test
   gui-on         Allow the container to open the MuJoCo window
   gui-off        Revoke that X11 permission
   usb            Configure adb reverse localhost:10000 for Quest
   host-ip        Print host IPv4 addresses for a Wi-Fi connection
   launch [port] [hybrid|vector|dexpilot]
-                 Start Endpoint + adapter + retargeting + MuJoCo viewer
+                 Start simulation plus the LeRobot mock backend
   headless [port] [hybrid|vector|dexpilot]
-                 Start the live pipeline without the MuJoCo window
+                 Start simulation/mock without the MuJoCo window
+  hardware [port] [mode] [hand_ip]
+                 Start MuJoCo plus the REAL Tesollo LeRobot backend (disarmed)
+  hardware-headless [port] [mode] [hand_ip]
+                 Start the real backend without the MuJoCo window (disarmed)
+  arm            Enable real motion after tracking and command checks
+  disarm         Stop forwarding new commands to the physical hand
+  lerobot-check  Verify LeRobot plugin discovery and its action schema
   endpoint [port]
                  Start only ROS-TCP-Endpoint for connection diagnostics
   quest-view [fps]
@@ -89,8 +96,7 @@ case "${1:-help}" in
     ;;
   test)
     require_container
-    "${compose[@]}" exec "${service}" bash -lc \
-      "${source_workspace}; cd /workspace; colcon test --base-paths /workspace/src --packages-select dg5f_teleop dg5f_unity_teleop ros_tcp_endpoint --event-handlers console_direct+ --return-code-on-test-failure; colcon test-result --verbose"
+    "${compose[@]}" exec "${service}" bash /workspace/scripts/test_inside.sh
     ;;
   smoke)
     require_container
@@ -127,6 +133,35 @@ case "${1:-help}" in
     fi
     "${compose[@]}" exec "${service}" bash -lc \
       "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
+    ;;
+  hardware|hardware-headless)
+    require_container
+    tcp_port="${2:-${RSL_TCP_PORT:-10000}}"
+    retarget_mode="${3:-${DG5F_RETARGET_MODE:-hybrid}}"
+    hand_ip="${4:-${DG5F_HAND_IP:-169.254.186.72}}"
+    retarget_config=$(mode_config "${retarget_mode}")
+    viewer=true
+    if [[ "${1}" == "hardware-headless" ]]; then
+      viewer=false
+    fi
+    echo "Starting REAL Tesollo backend at ${hand_ip}:502 in DISARMED state."
+    echo "After checking tracking and MuJoCo, use: bash scripts/stack.sh arm"
+    "${compose[@]}" exec "${service}" bash -lc \
+      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} lerobot_backend:=tesollo lerobot_auto_enable:=false lerobot_ip:=${hand_ip} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
+    ;;
+  arm|disarm)
+    require_container
+    enable=true
+    if [[ "${1}" == "disarm" ]]; then
+      enable=false
+    fi
+    "${compose[@]}" exec "${service}" bash -lc \
+      "${source_workspace}; ros2 service call /dg5f/lerobot/enable std_srvs/srv/SetBool '{data: ${enable}}'"
+    ;;
+  lerobot-check)
+    require_container
+    "${compose[@]}" exec "${service}" bash -lc \
+      "${source_workspace}; python3 -c 'from lerobot.utils.import_utils import register_third_party_plugins; register_third_party_plugins(); from lerobot.robots import RobotConfig; print(\"dg5f registered:\", \"dg5f\" in RobotConfig.get_known_choices()); from lerobot_robot_dg5f import Dg5f, Dg5fConfig; robot=Dg5f(Dg5fConfig(id=\"check\", backend=\"mock\")); print(\"actions:\", len(robot.action_features), \"observations:\", len(robot.observation_features))'"
     ;;
   endpoint)
     require_container
@@ -177,7 +212,7 @@ case "${1:-help}" in
       --no-audio \
       --max-fps="${view_fps}" \
       --video-bit-rate=12M \
-      --window-title="Quest 3 - RSL hybrid retargeting"
+      --window-title="Quest 3 - RSL LeRobot retargeting"
     ;;
   topics)
     require_container
@@ -186,10 +221,10 @@ case "${1:-help}" in
     ;;
   record)
     require_container
-    bag_name="${2:-hybrid_hand_$(date +%Y%m%d_%H%M%S)}"
+    bag_name="${2:-lerobot_hand_$(date +%Y%m%d_%H%M%S)}"
     install -d "${project_dir}/bags"
     "${compose[@]}" exec "${service}" bash -lc \
-      "${source_workspace}; ros2 bag record -o /workspace/bags/${bag_name} --storage mcap /quest/hand_pose /quest/hand_points /quest/hand_gesture /hands/right/landmarks /dg5f/joint_command /dg5f/target_joint_states /dg5f/joint_states /dg5f/tracking_ok /tf"
+      "${source_workspace}; ros2 bag record -o /workspace/bags/${bag_name} --storage mcap /quest/hand_pose /quest/hand_points /quest/hand_gesture /hands/right/landmarks /dg5f/joint_command /dg5f/target_joint_states /dg5f/joint_states /dg5f/tracking_ok /dg5f/lerobot/joint_states /dg5f/lerobot/commanded_joint_states /dg5f/lerobot/temperatures /dg5f/lerobot/connected /dg5f/lerobot/armed /tf"
     ;;
   shell)
     require_container

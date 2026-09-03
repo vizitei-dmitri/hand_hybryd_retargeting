@@ -1,0 +1,29 @@
+[build-system]
+requires = [
+    "scikit-build-core>=0.10",
+    "pybind11>=2.11",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "dg5f-python"
+version = "1.0.0"
+description = "Python bindings for controlling the Tesollo Delto Gripper 5F"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+dependencies = [
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+examples = [
+    "matplotlib>=3.5",
+]
+
+[tool.scikit-build]
+cmake.args = ["-DDG_CONTROL_BUILD_EXECUTABLE=OFF"]
+wheel.packages = []
+sdist.include = [
+    "lib/libDGSDK.so",
+]

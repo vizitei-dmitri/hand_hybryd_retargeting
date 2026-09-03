@@ -80,6 +80,24 @@ def smooth_contact_weight(distance, contact_start, contact_full, max_blend):
     return float(max_blend * x * x * (3.0 - 2.0 * x))
 
 
+def apply_fixed_joint_positions(
+    target: np.ndarray,
+    joint_names: list[str],
+    fixed_positions: dict[str, float],
+) -> np.ndarray:
+    """Apply a physical fault map without changing the other joint targets."""
+    result = np.asarray(target, dtype=np.float64).copy()
+    if result.shape != (len(joint_names),):
+        raise ValueError("Target shape does not match joint_names")
+    for name, position in fixed_positions.items():
+        if name not in joint_names:
+            raise ValueError(f"Unknown fixed DG5F joint: {name}")
+        if not np.isfinite(position):
+            raise ValueError(f"Fixed position for {name} must be finite")
+        result[joint_names.index(name)] = float(position)
+    return result
+
+
 class RetargetNode(Node):
     def __init__(self) -> None:
         super().__init__("dg5f_retarget")
@@ -96,6 +114,8 @@ class RetargetNode(Node):
         self.declare_parameter("input_reliability", "reliable")
         self.declare_parameter("prevent_distal_hyperextension", False)
         self.declare_parameter("distal_flexion_min", 0.0)
+        self.declare_parameter("fixed_joints", ["rj_dg_5_1"])
+        self.declare_parameter("fixed_joint_positions", [0.0])
 
         self.declare_parameter(
             "hybrid_dexpilot_config",
@@ -202,6 +222,18 @@ class RetargetNode(Node):
         self._hybrid_correction_state = np.zeros(len(JOINT_NAMES), dtype=np.float64)
         self._watchdog_timer = self.create_timer(0.1, self._watchdog)
 
+        fixed_names = list(self.get_parameter("fixed_joints").value)
+        fixed_values = list(self.get_parameter("fixed_joint_positions").value)
+        if len(fixed_names) != len(fixed_values):
+            raise ValueError(
+                "fixed_joints and fixed_joint_positions must have equal length"
+            )
+        self._fixed_positions = dict(zip(fixed_names, fixed_values))
+        # Validate before the first tracking frame.
+        apply_fixed_joint_positions(
+            np.zeros(len(JOINT_NAMES)), JOINT_NAMES, self._fixed_positions
+        )
+
         mode = (
             "HYBRID(Vector+DexPilot)"
             if self._hybrid
@@ -212,6 +244,10 @@ class RetargetNode(Node):
             f"{self.get_parameter('command_topic').value} "
             f"({mode}, 20 DG5F joints, scale {scale:.3f})"
         )
+        if self._fixed_positions:
+            self.get_logger().warning(
+                f"Physical fault map active: fixed joints {self._fixed_positions}"
+            )
 
     def _now_seconds(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
@@ -387,6 +423,12 @@ class RetargetNode(Node):
                 self._last_output - max_delta,
                 self._last_output + max_delta,
             )
+
+        # Apply after every optimizer/filter stage. The digital twin, LeRobot
+        # dataset action and physical hand therefore all receive the same fault.
+        target = apply_fixed_joint_positions(
+            target, JOINT_NAMES, self._fixed_positions
+        )
 
         self._last_output = target
         self._last_frame_time = now

@@ -1,4 +1,4 @@
-"""Start Unity ROS-TCP Endpoint, Mano adapter, retargeting, and MuJoCo."""
+"""Start the Unity, retargeting, MuJoCo and LeRobot DG5F pipeline."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -12,6 +12,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description() -> LaunchDescription:
     unity_share = FindPackageShare("dg5f_unity_teleop")
     core_share = FindPackageShare("dg5f_teleop")
+    lerobot_share = FindPackageShare("lerobot_robot_dg5f")
 
     return LaunchDescription(
         [
@@ -19,9 +20,18 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("start_adapter", default_value="true"),
             DeclareLaunchArgument("start_retarget", default_value="true"),
             DeclareLaunchArgument("start_mujoco", default_value="true"),
+            DeclareLaunchArgument("start_lerobot", default_value="true"),
             DeclareLaunchArgument("fake_mano", default_value="false"),
             DeclareLaunchArgument("mujoco_viewer", default_value="true"),
             DeclareLaunchArgument("tcp_port", default_value="10000"),
+            DeclareLaunchArgument("lerobot_backend", default_value="mock"),
+            DeclareLaunchArgument("lerobot_auto_enable", default_value="true"),
+            DeclareLaunchArgument("lerobot_ip", default_value="169.254.186.72"),
+            DeclareLaunchArgument("lerobot_port", default_value="502"),
+            DeclareLaunchArgument("lerobot_slave_id", default_value="1"),
+            DeclareLaunchArgument(
+                "lerobot_max_relative_target_deg", default_value="7.0"
+            ),
             DeclareLaunchArgument("max_joint_velocity", default_value="3.0"),
             DeclareLaunchArgument("mujoco_actuator_kp", default_value="40.0"),
             DeclareLaunchArgument("mujoco_actuator_kd", default_value="0.5"),
@@ -120,6 +130,44 @@ def generate_launch_description() -> LaunchDescription:
                     },
                 ],
                 condition=IfCondition(LaunchConfiguration("start_mujoco")),
+            ),
+            Node(
+                package="lerobot_robot_dg5f",
+                executable="ros_bridge",
+                name="dg5f_lerobot_bridge",
+                output="screen",
+                parameters=[
+                    PathJoinSubstitution(
+                        [lerobot_share, "config", "bridge.params.yaml"]
+                    ),
+                    {
+                        "backend": ParameterValue(
+                            LaunchConfiguration("lerobot_backend"),
+                            value_type=str,
+                        ),
+                        "auto_enable": ParameterValue(
+                            LaunchConfiguration("lerobot_auto_enable"),
+                            value_type=bool,
+                        ),
+                        "ip": ParameterValue(
+                            LaunchConfiguration("lerobot_ip"),
+                            value_type=str,
+                        ),
+                        "port": ParameterValue(
+                            LaunchConfiguration("lerobot_port"),
+                            value_type=int,
+                        ),
+                        "slave_id": ParameterValue(
+                            LaunchConfiguration("lerobot_slave_id"),
+                            value_type=int,
+                        ),
+                        "max_relative_target_deg": ParameterValue(
+                            LaunchConfiguration("lerobot_max_relative_target_deg"),
+                            value_type=float,
+                        ),
+                    },
+                ],
+                condition=IfCondition(LaunchConfiguration("start_lerobot")),
             ),
         ]
     )

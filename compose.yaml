@@ -1,8 +1,8 @@
-name: dg5f-hybrid-retargeting
+name: dg5f-lerobot-retargeting
 
 services:
-  hybrid_hand:
-    image: dg5f-hybrid-retargeting:humble
+  lerobot_hand:
+    image: dg5f-lerobot-retargeting:humble
     build:
       context: .
       dockerfile: docker/Dockerfile
