@@ -36,6 +36,9 @@ class Dg5fBackend(Protocol):
     ) -> dict[str, Optional[np.ndarray]]:
         pass
 
+    def read_control_status(self) -> dict[str, object]:
+        pass
+
 
 class MockDg5fBackend:
     """In-memory backend for tests and no-hardware pipeline validation."""
@@ -82,6 +85,33 @@ class MockDg5fBackend:
             "vel": zeros.copy(),
             "current": zeros.copy(),
             "temp": zeros.copy(),
+        }
+
+    def read_control_status(self) -> dict[str, object]:
+        connected = bool(self._connected)
+        return {
+            "connected": connected,
+            "transport_connected": connected,
+            "control_running": connected,
+            "control_thread_alive": connected,
+            "motion_ready": connected,
+            "system_started": connected,
+            "telemetry_valid": connected,
+            "temperature_safe": connected,
+            "servo_keepalive_enabled": True,
+            "communication_rate_hz": 1000 if connected else 0,
+            "data_processing_status": 0,
+            "last_motion_result": 0,
+            "disconnect_count": 0,
+            "reconnect_count": 0,
+            "diagnosis_process": 0,
+            "diagnosis_step": 0,
+            "diagnosis_joint_id": 0,
+            "diagnosis_period": 0,
+            "diagnosis_joint": 0,
+            "diagnosis_temperature": 0,
+            "latest_command_valid": connected,
+            "latest_command_deg": self._positions.copy(),
         }
 
 
@@ -160,6 +190,12 @@ class TesolloDg5fBackend:
                             "communication_rate_hz="
                             f"{status.get('communication_rate_hz')}",
                             f"last_motion_result={status.get('last_motion_result')}",
+                            "transport_connected="
+                            f"{status.get('transport_connected', status.get('connected'))}",
+                            "control_thread_alive="
+                            f"{status.get('control_thread_alive', status.get('control_running'))}",
+                            f"motion_ready={status.get('motion_ready')}",
+                            f"telemetry_valid={status.get('telemetry_valid')}",
                         ]
                     )
             except Exception:

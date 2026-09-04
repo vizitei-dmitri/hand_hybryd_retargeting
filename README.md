@@ -265,6 +265,8 @@ bash scripts/stack.sh hardware-headless 10000 hybrid 169.254.186.72
 | `/dg5f/lerobot/temperatures` | температура 20 приводов |
 | `/dg5f/lerobot/connected` | соединение с backend |
 | `/dg5f/lerobot/armed` | разрешена ли передача движения |
+| `/dg5f/lerobot/diagnostics` | единый snapshot состояния DGSDK (`DiagnosticArray`) |
+| `/dg5f/debug_marker` | пользовательская метка только для debug recorder |
 | `/dg5f/lerobot/enable` | сервис `std_srvs/SetBool` для arm/disarm |
 
 `/dg5f/joint_command` показывает raw-результат ретаргетинга, MuJoCo следует
@@ -393,6 +395,69 @@ bash scripts/stack.sh lerobot-check
 
 В smoke-тесте автоматически проверяется весь путь от фальшивого RSL TCP-пакета
 до MuJoCo и mock LeRobot, включая нулевое значение `rj_dg_5_1` во всех выходах.
+
+### Пассивная запись аппаратного сбоя
+
+`debug-record` не создаёт второй экземпляр `DGApi`, не подключается к порту
+кисти `502` и не вызывает arm/disarm или команды движения. Это отдельный
+ROS-процесс: он только слушает топики уже работающего pipeline и читает
+счётчики Linux из `/sys/class/net/<interface>/statistics`.
+
+Эксперимент запускается в трёх терминалах.
+
+Терминал 1 — pipeline (он стартует в состоянии `DISARMED`):
+
+```bash
+cd /home/yoba/Documents/work/hand_hybryd_retargeting
+bash scripts/stack.sh hardware 10000 hybrid 169.254.186.72
+```
+
+Терминал 2 — рекордер до начала движения, чтобы сохранить 5–10 секунд перед
+возможным fault:
+
+```bash
+cd /home/yoba/Documents/work/hand_hybryd_retargeting
+bash scripts/stack.sh debug-record
+```
+
+Терминал 3 — после проверки MuJoCo включить настоящую кисть:
+
+```bash
+cd /home/yoba/Documents/work/hand_hybryd_retargeting
+bash scripts/stack.sh arm
+```
+
+В момент касания или предполагаемой коллизии можно поставить метку, не влияющую
+на управление:
+
+```bash
+bash scripts/stack.sh debug-mark collision
+```
+
+После эксперимента нажмите `Ctrl+C` только в терминале рекордера. Он корректно
+закроет файлы и напечатает два пути. Результат находится в:
+
+```text
+debug_runs/YYYY-mm-dd_HH-MM-SS/
+debug_runs/dg5f_debug_YYYY-mm-dd_HH-MM-SS.tar.gz
+```
+
+В каталоге будут `manifest.json`, `timeline.csv`, `events.jsonl`,
+`ros_topics.txt`, `system.txt`, `network.log`, `README.txt` и `summary.txt`.
+CSV пишется с частотой `30 Hz` по монотонным часам и содержит для всех 20
+суставов raw target, effective LeRobot command, последнюю low-level команду
+DGSDK, измеренные position/velocity/current/temperature и tracking error.
+Отдельно сохраняются `transport_connected`, `control_thread_alive`,
+`motion_ready`, `system_started`, `telemetry_valid`, `temperature_safe`, частота
+связи, коды DGSDK, `DiagnosisSystem` и счётчики disconnect/reconnect. Временно
+отсутствующие потоки записываются как `NaN`/пустое значение/`false`, запись не
+останавливается.
+
+Опциональный постоянный ping включается `debug-record --ping`. Захват TCP
+выключен по умолчанию; `debug-record --tcpdump` попытается создать
+`dg5f_tcp.pcap`, а при отсутствии `tcpdump` или прав продолжит основную запись
+и оставит объяснение в `tcpdump.log`. Ни один из режимов не меняет адрес,
+маршрут, NetworkManager или состояние сетевого интерфейса.
 
 Показ экрана Quest и запись rosbag:
 

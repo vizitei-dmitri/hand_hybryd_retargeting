@@ -2,6 +2,16 @@
 
 using namespace handcontrol;
 
+namespace
+{
+std::int64_t steadyNowNs()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+    ).count();
+}
+}
+
 DGControl *DGControl::_instancePtr = nullptr; 
 
 DGControl::DGControl(const char* ip, int port, int slaveID):
@@ -31,18 +41,32 @@ DGControl* DGControl::getInstance(const char* ip, int port, int slaveID)
 
 void DGControl::_ConnectedCallback()
 {
-    getInstance()->_g_connected.store(true);
+    DGControl* control = getInstance();
+    const bool wasConnected = control->_g_connected.exchange(true);
+    if (!wasConnected && control->_everConnected.exchange(true))
+    {
+        control->_reconnectCount.fetch_add(1);
+    }
 }
 
 void DGControl::_DisconnectedCallback()
 {
-    getInstance()->_g_connected.store(false);
+    DGControl* control = getInstance();
+    if (control->_g_connected.exchange(false))
+    {
+        control->_disconnectCount.fetch_add(1);
+    }
     std::cerr << "DGSDK disconnected callback\n";
 }
 
 void DGControl::_ReceivedGripperDataCallback(ReceivedGripperData data)
 {
-    getInstance()->_g_gripperData = data;
+    DGControl* control = getInstance();
+    {
+        std::lock_guard<std::mutex> lock(control->_gripperDataMutex);
+        control->_g_gripperData = data;
+    }
+    control->_lastTelemetryNs.store(steadyNowNs());
 }
 
 void DGControl::_CommunicationPeriodCallback(int period)
@@ -52,7 +76,13 @@ void DGControl::_CommunicationPeriodCallback(int period)
 
 void DGControl::_DiagnosisCallback(DiagnosisSystem diag)
 {
-    getInstance()->_g_diagnosisData = diag;
+    DGControl* control = getInstance();
+    control->_diagnosisProcess.store(diag.process);
+    control->_diagnosisStep.store(diag.step);
+    control->_diagnosisJointId.store(diag.jointId);
+    control->_diagnosisPeriod.store(diag.period);
+    control->_diagnosisJoint.store(diag.joint);
+    control->_diagnosisTemperature.store(diag.temperature);
 }
 
 void DGControl::_FingertipCallback(ReceivedFingertipSensorData data)
@@ -99,6 +129,10 @@ void DGControl::start(bool servoKeepalive)
     setting.readTimeout       = this->_readTimeout;
     std::memcpy(setting.ip, this->_ip, MAX_GRIPPER_IP_ADDRESS_SIZE);
 
+    _lastTelemetryNs.store(0);
+    _latestCommandValid.store(false);
+    _systemStarted.store(false);
+
     result = SetGripperSystem(setting);
     std::cout << "SetGripperSystem: " << result << "\n";
     success += result;
@@ -138,7 +172,10 @@ void DGControl::start(bool servoKeepalive)
     // Capture the real pose before activating the servo system.  A DISARMED
     // hardware session will keep only this pose alive; it must never inherit
     // the firmware's default all-zero target.
-    std::memcpy(_tempPos, _g_gripperData.joint, sizeof(_g_gripperData.joint));
+    {
+        std::lock_guard<std::mutex> lock(_gripperDataMutex);
+        std::memcpy(_tempPos, _g_gripperData.joint, sizeof(_g_gripperData.joint));
+    }
     _tempPos[16] = 0.0;
     _servoKeepaliveEnabled.store(servoKeepalive);
     _temperatureSafe.store(false);
@@ -188,6 +225,7 @@ void DGControl::stop()
     if (_control.joinable()) _control.join();
     _controlRunning.store(false);
     _temperatureSafe.store(false);
+    _lastTelemetryNs.store(0);
     _g_commPeriod.store(0);
     if (_systemStarted.exchange(false)) SystemStop();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -218,10 +256,13 @@ void DGControl::_loop()
 
     while(_g_connected.load())
     {
-        std::memcpy(_currentPos, _g_gripperData.joint, sizeof(_g_gripperData.joint));   // Запись информации с гриппера
-        std::memcpy(_currentCur, _g_gripperData.current, sizeof(_g_gripperData.current));   // Запись информации с гриппера
-        std::memcpy(_currentVel, _g_gripperData.velocity, sizeof(_g_gripperData.velocity));   // Запись информации с гриппера
-        std::memcpy(_currentTemp, _g_gripperData.temperature, sizeof(_g_gripperData.temperature));   // Запись информации с гриппера
+        {
+            std::lock_guard<std::mutex> lock(_gripperDataMutex);
+            std::memcpy(_currentPos, _g_gripperData.joint, sizeof(_g_gripperData.joint));
+            std::memcpy(_currentCur, _g_gripperData.current, sizeof(_g_gripperData.current));
+            std::memcpy(_currentVel, _g_gripperData.velocity, sizeof(_g_gripperData.velocity));
+            std::memcpy(_currentTemp, _g_gripperData.temperature, sizeof(_g_gripperData.temperature));
+        }
 
         array2EigenArray(_currentPos, _msgCurrentPos);
         array2EigenArray(_currentCur, _msgCurrentCur);
@@ -257,6 +298,12 @@ void DGControl::_loop()
             _tempPos[16] = 0.0;         // Зануление для безопасности дефектного 16 джоинта
             const DG_RESULT result = MoveServoJoint(_tempPos);
             _lastMotionResult.store(static_cast<int>(result));
+            if (result == DG_RESULT_NONE)
+            {
+                std::lock_guard<std::mutex> lock(_commandMutex);
+                std::memcpy(_latestCommandPos, _tempPos, sizeof(_tempPos));
+                _latestCommandValid.store(true);
+            }
         }
 
         next += controlPeriod;
@@ -376,14 +423,65 @@ bool DGControl::isServoKeepaliveEnabled() const
     return _servoKeepaliveEnabled.load();
 }
 
+bool DGControl::isMotionReady() const
+{
+    return _g_connected.load() &&
+           _controlRunning.load() &&
+           _systemStarted.load() &&
+           isTelemetryValid() &&
+           _temperatureSafe.load() &&
+           _lastMotionResult.load() == DG_RESULT_NONE;
+}
+
+bool DGControl::isTelemetryValid() const
+{
+    const std::int64_t last = _lastTelemetryNs.load();
+    constexpr std::int64_t telemetryTimeoutNs = 500'000'000LL;
+    return _g_connected.load() && last > 0 &&
+           steadyNowNs() - last <= telemetryTimeoutNs;
+}
+
 int DGControl::getCommunicationRateHz() const
 {
     return _g_commPeriod.load();
 }
 
+int DGControl::getDataProcessingStatus() const
+{
+    return _g_processing.load();
+}
+
 int DGControl::getLastMotionResult() const
 {
     return _lastMotionResult.load();
+}
+
+std::uint64_t DGControl::getDisconnectCount() const
+{
+    return _disconnectCount.load();
+}
+
+std::uint64_t DGControl::getReconnectCount() const
+{
+    return _reconnectCount.load();
+}
+
+int DGControl::getDiagnosisProcess() const { return _diagnosisProcess.load(); }
+int DGControl::getDiagnosisStep() const { return _diagnosisStep.load(); }
+int DGControl::getDiagnosisJointId() const { return _diagnosisJointId.load(); }
+int DGControl::getDiagnosisPeriod() const { return _diagnosisPeriod.load(); }
+int DGControl::getDiagnosisJoint() const { return _diagnosisJoint.load(); }
+int DGControl::getDiagnosisTemperature() const
+{
+    return _diagnosisTemperature.load();
+}
+
+bool DGControl::getLatestCommand(float* command) const
+{
+    if (!_latestCommandValid.load()) return false;
+    std::lock_guard<std::mutex> lock(_commandMutex);
+    std::memcpy(command, _latestCommandPos, sizeof(_latestCommandPos));
+    return true;
 }
 
 bool DGControl::getCurrentPosition(float* position)

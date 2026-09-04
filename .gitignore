@@ -1,6 +1,7 @@
 /build/
 /install/
 /log/
+/debug_runs/
 /bags/*
 !/bags/.gitkeep
 /.tools/

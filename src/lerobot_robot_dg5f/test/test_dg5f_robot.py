@@ -56,4 +56,8 @@ def test_mock_observation_uses_lerobot_feature_contract():
     assert set(observation) == set(robot.observation_features)
     assert observation[f"{JOINT_NAMES[0]}.pos"] == 1.0
     assert observation["rj_dg_5_1.pos"] == 0.0
+    diagnostics = robot.get_diagnostics()
+    assert diagnostics["transport_connected"] is True
+    assert diagnostics["motion_ready"] is True
+    assert len(diagnostics["latest_command_deg"]) == 20
     robot.disconnect()

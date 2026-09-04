@@ -151,6 +151,26 @@ class Dg5f(Robot):
             for index, joint in enumerate(JOINT_NAMES)
         }
 
+    def get_diagnostics(self) -> dict[str, object]:
+        """Return passive low-level health and the most recent telemetry."""
+        if not self.is_connected:
+            status: dict[str, object] = {
+                "connected": False,
+                "transport_connected": False,
+                "control_running": False,
+                "control_thread_alive": False,
+                "motion_ready": False,
+                "system_started": False,
+                "telemetry_valid": False,
+                "temperature_safe": False,
+            }
+        else:
+            status = dict(self.backend.read_control_status())
+
+        for field in TELEMETRY_FIELDS:
+            status[f"measured_{field}"] = self._telemetry[field].copy()
+        return status
+
     def send_action(self, action: RobotAction) -> RobotAction:
         if not self.is_connected:
             raise RuntimeError("DG5F is not connected")

@@ -5,6 +5,7 @@ from typing import Optional
 
 import numpy as np
 import rclpy
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32MultiArray
@@ -59,6 +60,9 @@ class Dg5fLeRobotBridge(Node):
         self.declare_parameter("temperature_topic", "/dg5f/lerobot/temperatures")
         self.declare_parameter("connected_topic", "/dg5f/lerobot/connected")
         self.declare_parameter("armed_topic", "/dg5f/lerobot/armed")
+        self.declare_parameter(
+            "diagnostics_topic", "/dg5f/lerobot/diagnostics"
+        )
         self.declare_parameter("enable_service", "/dg5f/lerobot/enable")
         self.declare_parameter("backend", "mock")
         self.declare_parameter("ip", "169.254.186.72")
@@ -164,6 +168,11 @@ class Dg5fLeRobotBridge(Node):
         )
         self._armed_pub = self.create_publisher(
             Bool, str(self.get_parameter("armed_topic").value), 1
+        )
+        self._diagnostics_pub = self.create_publisher(
+            DiagnosticArray,
+            str(self.get_parameter("diagnostics_topic").value),
+            5,
         )
         self._command_sub = self.create_subscription(
             JointTrajectory,
@@ -287,15 +296,46 @@ class Dg5fLeRobotBridge(Node):
         self._commanded_state_pub.publish(message)
 
     def _publish_state(self) -> None:
-        self._connected_pub.publish(Bool(data=self._robot.is_connected))
+        try:
+            diagnostics = self._robot.get_diagnostics()
+        except Exception as error:
+            diagnostics = {
+                "transport_connected": False,
+                "control_thread_alive": False,
+                "motion_ready": False,
+                "system_started": False,
+                "telemetry_valid": False,
+                "temperature_safe": False,
+                "diagnostics_error": str(error),
+            }
+
+        transport_connected = bool(
+            diagnostics.get(
+                "transport_connected",
+                diagnostics.get("connected", self._robot.is_connected),
+            )
+        )
+        if not transport_connected and self._armed:
+            self._armed = False
+            self._robot.hold_position()
+            self._warn_throttled("DGSDK transport disconnected; output was disarmed")
+
+        self._connected_pub.publish(Bool(data=transport_connected))
         self._armed_pub.publish(Bool(data=self._armed))
-        if not self._robot.is_connected:
+        if not self._robot.is_connected or not transport_connected:
+            self._publish_diagnostics(diagnostics)
             return
         try:
             observation = self._robot.get_observation()
         except Exception as error:
             self._warn_throttled(f"Could not read LeRobot DG5F state: {error}")
+            self._publish_diagnostics(diagnostics)
             return
+
+        try:
+            diagnostics = self._robot.get_diagnostics()
+        except Exception as error:
+            diagnostics["diagnostics_error"] = str(error)
 
         message = JointState()
         message.header.stamp = self.get_clock().now().to_msg()
@@ -317,6 +357,94 @@ class Dg5fLeRobotBridge(Node):
                 data=[float(observation[f"{joint}.temp"]) for joint in JOINT_NAMES]
             )
         )
+        self._publish_diagnostics(diagnostics)
+
+    @staticmethod
+    def _diagnostic_text(value: object) -> str:
+        if isinstance(value, np.ndarray):
+            return ",".join(f"{float(item):.9g}" for item in value)
+        if isinstance(value, (list, tuple)):
+            return ",".join(str(item) for item in value)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    def _publish_diagnostics(self, values: dict[str, object]) -> None:
+        """Publish one self-contained passive snapshot for the recorder."""
+        status = DiagnosticStatus()
+        status.name = "dg5f_lerobot_bridge"
+        status.hardware_id = str(self.get_parameter("ip").value)
+
+        transport = bool(values.get("transport_connected", False))
+        thread_alive = bool(values.get("control_thread_alive", False))
+        system_started = bool(values.get("system_started", False))
+        telemetry_valid = bool(values.get("telemetry_valid", False))
+        temperature_safe = bool(values.get("temperature_safe", False))
+        motion_ready = bool(values.get("motion_ready", False))
+        last_motion_result = int(values.get("last_motion_result", 0))
+        if not transport or not thread_alive or last_motion_result != 0:
+            status.level = DiagnosticStatus.ERROR
+            status.message = "low-level transport/control fault"
+        elif not system_started or not telemetry_valid or not temperature_safe:
+            status.level = DiagnosticStatus.WARN
+            status.message = "hardware is connected but not motion-ready"
+        elif not motion_ready:
+            status.level = DiagnosticStatus.WARN
+            status.message = "motion is not ready"
+        else:
+            status.level = DiagnosticStatus.OK
+            status.message = "motion-ready"
+
+        snapshot = dict(values)
+        snapshot["armed"] = self._armed
+        snapshot["tracking_ok"] = self._tracking_ok
+
+        measured_pos = np.asarray(
+            snapshot.get("measured_pos", np.full(len(JOINT_NAMES), np.nan)),
+            dtype=np.float64,
+        )
+        current = np.asarray(
+            snapshot.get("measured_current", np.full(len(JOINT_NAMES), np.nan)),
+            dtype=np.float64,
+        )
+        temperature = np.asarray(
+            snapshot.get("measured_temp", np.full(len(JOINT_NAMES), np.nan)),
+            dtype=np.float64,
+        )
+        command = np.asarray(
+            snapshot.get("latest_command_deg", np.full(len(JOINT_NAMES), np.nan)),
+            dtype=np.float64,
+        )
+
+        def add_maximum(prefix: str, data: np.ndarray, *, absolute: bool) -> None:
+            if data.shape != (len(JOINT_NAMES),) or not np.any(np.isfinite(data)):
+                snapshot[f"max_{prefix}"] = float("nan")
+                snapshot[f"max_{prefix}_joint"] = ""
+                return
+            ranked = np.abs(data) if absolute else data
+            index = int(np.nanargmax(ranked))
+            snapshot[f"max_{prefix}"] = float(ranked[index])
+            snapshot[f"max_{prefix}_joint"] = JOINT_NAMES[index]
+
+        add_maximum("current", current, absolute=True)
+        add_maximum("temperature", temperature, absolute=False)
+        if bool(snapshot.get("latest_command_valid", False)) and command.shape == measured_pos.shape:
+            add_maximum("tracking_error_deg", command - measured_pos, absolute=True)
+        else:
+            add_maximum(
+                "tracking_error_deg",
+                np.full(len(JOINT_NAMES), np.nan),
+                absolute=True,
+            )
+
+        status.values = [
+            KeyValue(key=str(key), value=self._diagnostic_text(value))
+            for key, value in sorted(snapshot.items())
+        ]
+        message = DiagnosticArray()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.status = [status]
+        self._diagnostics_pub.publish(message)
 
     def destroy_node(self):
         if hasattr(self, "_robot") and self._robot.is_connected:

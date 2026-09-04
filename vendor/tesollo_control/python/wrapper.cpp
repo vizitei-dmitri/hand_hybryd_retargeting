@@ -104,13 +104,35 @@ PYBIND11_MODULE(dg5f_python, m)
             [](const handcontrol::DGControl& self)
             {
                 py::dict status;
+                float latest_command[MAX_JOINT_COUNT] = {0};
+                const bool latest_command_valid =
+                    self.getLatestCommand(latest_command);
+
+                // Keep the original keys for downstream compatibility and
+                // expose explicit transport/thread names for diagnostics.
                 status["connected"] = self.isConnected();
+                status["transport_connected"] = self.isConnected();
                 status["control_running"] = self.isControlRunning();
+                status["control_thread_alive"] = self.isControlRunning();
+                status["motion_ready"] = self.isMotionReady();
                 status["system_started"] = self.isSystemStarted();
+                status["telemetry_valid"] = self.isTelemetryValid();
                 status["temperature_safe"] = self.isTemperatureSafe();
                 status["servo_keepalive_enabled"] = self.isServoKeepaliveEnabled();
                 status["communication_rate_hz"] = self.getCommunicationRateHz();
+                status["data_processing_status"] = self.getDataProcessingStatus();
                 status["last_motion_result"] = self.getLastMotionResult();
+                status["disconnect_count"] = self.getDisconnectCount();
+                status["reconnect_count"] = self.getReconnectCount();
+                status["diagnosis_process"] = self.getDiagnosisProcess();
+                status["diagnosis_step"] = self.getDiagnosisStep();
+                status["diagnosis_joint_id"] = self.getDiagnosisJointId();
+                status["diagnosis_period"] = self.getDiagnosisPeriod();
+                status["diagnosis_joint"] = self.getDiagnosisJoint();
+                status["diagnosis_temperature"] = self.getDiagnosisTemperature();
+                status["latest_command_valid"] = latest_command_valid;
+                status["latest_command_deg"] =
+                    to_numpy_copy(latest_command, MAX_JOINT_COUNT);
                 return status;
             }
         );

@@ -13,6 +13,7 @@
 #include <functional>
 #include <atomic>
 #include <algorithm>
+#include <cstdint>
 
 #include <Eigen/Dense>
 
@@ -42,6 +43,21 @@ private:
     std::atomic<bool> _temperatureSafe{false};
     std::atomic<bool> _servoKeepaliveEnabled{true};
     std::atomic<int> _lastMotionResult{DG_RESULT_NONE};
+    std::atomic<bool> _everConnected{false};
+    std::atomic<std::uint64_t> _disconnectCount{0};
+    std::atomic<std::uint64_t> _reconnectCount{0};
+    std::atomic<std::int64_t> _lastTelemetryNs{0};
+    std::atomic<bool> _latestCommandValid{false};
+
+    std::atomic<int> _diagnosisProcess{0};
+    std::atomic<int> _diagnosisStep{0};
+    std::atomic<int> _diagnosisJointId{0};
+    std::atomic<int> _diagnosisPeriod{0};
+    std::atomic<int> _diagnosisJoint{0};
+    std::atomic<int> _diagnosisTemperature{0};
+
+    mutable std::mutex _gripperDataMutex;
+    mutable std::mutex _commandMutex;
 
     // ----------------- Connections
     char _ip[MAX_GRIPPER_IP_ADDRESS_SIZE] = "169.254.186.72";
@@ -87,6 +103,7 @@ private:
         0,0,0,0,
         0,0,0,0
     };
+    float _latestCommandPos[MAX_JOINT_COUNT] = {0};
 
     // ----------------- Queues
     ring_buffer<Eigen::Array<double,MAX_JOINT_COUNT,1>> _target_joint_buffer;
@@ -151,8 +168,20 @@ public:
     bool isSystemStarted() const;
     bool isTemperatureSafe() const;
     bool isServoKeepaliveEnabled() const;
+    bool isMotionReady() const;
+    bool isTelemetryValid() const;
     int getCommunicationRateHz() const;
+    int getDataProcessingStatus() const;
     int getLastMotionResult() const;
+    std::uint64_t getDisconnectCount() const;
+    std::uint64_t getReconnectCount() const;
+    int getDiagnosisProcess() const;
+    int getDiagnosisStep() const;
+    int getDiagnosisJointId() const;
+    int getDiagnosisPeriod() const;
+    int getDiagnosisJoint() const;
+    int getDiagnosisTemperature() const;
+    bool getLatestCommand(float* command) const;
 
 };
 

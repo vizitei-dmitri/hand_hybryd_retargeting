@@ -51,6 +51,10 @@ Commands:
                  Mirror the authorized Quest display to this PC
   topics         List ROS topics
   record [name]  Record Quest, normalized landmarks and DG5F state
+  debug-record [--ping] [--tcpdump]
+                 Passively record DG5F/ROS/network diagnostics (no control)
+  debug-mark LABEL
+                 Add an event marker to the active passive recording
   shell          Open a shell in the container
   logs           Show container logs
   stop           Stop only this project's container
@@ -253,7 +257,35 @@ case "${1:-help}" in
     bag_name="${2:-lerobot_hand_$(date +%Y%m%d_%H%M%S)}"
     install -d "${project_dir}/bags"
     "${compose[@]}" exec "${service}" bash -lc \
-      "${source_workspace}; ros2 bag record -o /workspace/bags/${bag_name} --storage mcap /quest/hand_pose /quest/hand_points /quest/hand_gesture /hands/right/landmarks /dg5f/joint_command /dg5f/target_joint_states /dg5f/joint_states /dg5f/tracking_ok /dg5f/lerobot/joint_states /dg5f/lerobot/commanded_joint_states /dg5f/lerobot/temperatures /dg5f/lerobot/connected /dg5f/lerobot/armed /tf"
+      "${source_workspace}; ros2 bag record -o /workspace/bags/${bag_name} --storage mcap /quest/hand_pose /quest/hand_points /quest/hand_gesture /hands/right/landmarks /dg5f/joint_command /dg5f/target_joint_states /dg5f/joint_states /dg5f/tracking_ok /dg5f/lerobot/joint_states /dg5f/lerobot/commanded_joint_states /dg5f/lerobot/temperatures /dg5f/lerobot/connected /dg5f/lerobot/armed /dg5f/lerobot/diagnostics /dg5f/debug_marker /tf"
+    ;;
+  debug-record)
+    require_container
+    hand_ip="${DG5F_HAND_IP:-169.254.186.72}"
+    network_interface="${DG5F_NETWORK_INTERFACE:-enp49s0}"
+    extra_args=()
+    for option in "${@:2}"; do
+      case "${option}" in
+        --ping|--tcpdump) extra_args+=("${option}") ;;
+        *)
+          echo "debug-record accepts only --ping and --tcpdump." >&2
+          exit 2
+          ;;
+      esac
+    done
+    echo "Starting passive recorder. It does not connect to or control DG-5F."
+    "${compose[@]}" exec "${service}" bash -lc \
+      "${source_workspace}; ros2 run lerobot_robot_dg5f debug_recorder --output-root /workspace/debug_runs --project-dir /workspace --interface ${network_interface} --hand-ip ${hand_ip} ${extra_args[*]}"
+    ;;
+  debug-mark)
+    require_container
+    marker="${2:-}"
+    if [[ -z "${marker}" || ! "${marker}" =~ ^[[:alnum:]_.:-]+$ ]]; then
+      echo "Marker must contain only letters, digits, underscore, dot, colon or dash." >&2
+      exit 2
+    fi
+    "${compose[@]}" exec "${service}" bash -lc \
+      "${source_workspace}; ros2 topic pub --once /dg5f/debug_marker std_msgs/msg/String \"{data: '${marker}'}\""
     ;;
   shell)
     require_container

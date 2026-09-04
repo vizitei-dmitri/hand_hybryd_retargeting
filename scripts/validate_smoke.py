@@ -6,6 +6,7 @@ import sys
 import time
 
 import rclpy
+from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseArray
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -48,6 +49,12 @@ class SmokeValidator(Node):
         )
         self.create_subscription(Bool, "/dg5f/tracking_ok", self._tracking, 10)
         self.create_subscription(Bool, "/dg5f/lerobot/armed", self._armed, 10)
+        self.create_subscription(
+            DiagnosticArray,
+            "/dg5f/lerobot/diagnostics",
+            self._diagnostics,
+            10,
+        )
 
     def _quest(self, message: ManoLandmarks) -> None:
         if len(message.landmarks) == 21:
@@ -90,6 +97,24 @@ class SmokeValidator(Node):
     def _armed(self, message: Bool) -> None:
         if message.data:
             self.received.add("armed")
+
+    def _diagnostics(self, message: DiagnosticArray) -> None:
+        for status in message.status:
+            if status.name != "dg5f_lerobot_bridge":
+                continue
+            values = {item.key: item.value for item in status.values}
+            required = {
+                "transport_connected",
+                "control_thread_alive",
+                "motion_ready",
+                "telemetry_valid",
+                "latest_command_deg",
+                "max_current",
+                "max_temperature",
+                "max_tracking_error_deg",
+            }
+            if required <= values.keys():
+                self.received.add("diagnostics")
 
 
 class DisarmValidator(Node):
@@ -138,6 +163,7 @@ def main() -> int:
         "lerobot_state",
         "tracking",
         "armed",
+        "diagnostics",
     }
     rclpy.init()
     node = SmokeValidator()
