@@ -194,9 +194,12 @@ bash scripts/stack.sh hardware 10000 hybrid 169.254.186.72
 другом терминале проверьте состояние:
 
 Низкоуровневая обёртка не вызывает `MoveServoJoint()` до получения первой
-реальной position-команды после `arm`. Частота, сообщаемая DGSDK, трактуется
-как Hz, а внутренний adapter loop ограничен безопасными `200 Hz`; входные
-setpoint по-прежнему формируются LeRobot с частотой `50 Hz`.
+реальной position-команды после `arm`, кроме безопасного keepalive фактической
+стартовой позы: Developer Mode Tesollo отключает control session без servo
+traffic. Keepalive не использует target Quest и предотвращает расслабление
+кисти до `arm`; в `sdk-check` он полностью отключён. Частота, сообщаемая DGSDK,
+трактуется как Hz, а внутренний adapter loop ограничен безопасными `200 Hz`;
+входные setpoint по-прежнему формируются LeRobot с частотой `50 Hz`.
 
 ```bash
 cd /home/yoba/Documents/work/hand_hybryd_retargeting

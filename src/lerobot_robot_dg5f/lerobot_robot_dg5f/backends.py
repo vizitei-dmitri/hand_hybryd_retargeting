@@ -88,10 +88,18 @@ class MockDg5fBackend:
 class TesolloDg5fBackend:
     """Thin adapter around the bundled ``dg5f_python`` DGSDK binding."""
 
-    def __init__(self, ip: str, port: int, slave_id: int) -> None:
+    def __init__(
+        self,
+        ip: str,
+        port: int,
+        slave_id: int,
+        *,
+        servo_keepalive: bool = True,
+    ) -> None:
         self.ip = ip
         self.port = port
         self.slave_id = slave_id
+        self.servo_keepalive = bool(servo_keepalive)
         self._api = None
         self._connected = False
 
@@ -112,7 +120,7 @@ class TesolloDg5fBackend:
         self._api = dg5f_python.DGApi.instance(
             self.ip, int(self.port), int(self.slave_id)
         )
-        self._api.start()
+        self._api.start(self.servo_keepalive)
         self._connected = True
 
     def disconnect(self) -> None:
@@ -145,7 +153,10 @@ class TesolloDg5fBackend:
                         [
                             f"connected={status.get('connected')}",
                             f"control_running={status.get('control_running')}",
+                            f"system_started={status.get('system_started')}",
                             f"temperature_safe={status.get('temperature_safe')}",
+                            "servo_keepalive_enabled="
+                            f"{status.get('servo_keepalive_enabled')}",
                             "communication_rate_hz="
                             f"{status.get('communication_rate_hz')}",
                             f"last_motion_result={status.get('last_motion_result')}",

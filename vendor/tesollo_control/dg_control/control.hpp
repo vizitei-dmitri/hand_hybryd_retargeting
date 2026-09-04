@@ -38,7 +38,9 @@ private:
     std::atomic<int> _g_commPeriod{0};
     std::atomic<int> _g_processing{0};
     std::atomic<bool> _controlRunning{false};
+    std::atomic<bool> _systemStarted{false};
     std::atomic<bool> _temperatureSafe{false};
+    std::atomic<bool> _servoKeepaliveEnabled{true};
     std::atomic<int> _lastMotionResult{DG_RESULT_NONE};
 
     // ----------------- Connections
@@ -129,7 +131,7 @@ public:
 
     static DGControl* getInstance(const char* ip = "169.254.186.72", int port = 502, int slaveID = 1);
 
-    void start();
+    void start(bool servoKeepalive = true);
     void stop();
 
     bool setTragetPosition(const Eigen::Array<double,MAX_JOINT_COUNT,1> &t_position);
@@ -146,7 +148,9 @@ public:
 
     bool isConnected() const;
     bool isControlRunning() const;
+    bool isSystemStarted() const;
     bool isTemperatureSafe() const;
+    bool isServoKeepaliveEnabled() const;
     int getCommunicationRateHz() const;
     int getLastMotionResult() const;
 

@@ -33,7 +33,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=2.0)
     args = parser.parse_args()
 
-    backend = TesolloDg5fBackend(args.ip, args.port, args.slave_id)
+    backend = TesolloDg5fBackend(
+        args.ip,
+        args.port,
+        args.slave_id,
+        servo_keepalive=False,
+    )
     backend.connect()
     try:
         position = backend.read_initial_position(args.timeout, drain_limit=16)
@@ -73,7 +78,9 @@ def main() -> int:
             for key in (
                 "connected",
                 "control_running",
+                "system_started",
                 "temperature_safe",
+                "servo_keepalive_enabled",
                 "communication_rate_hz",
                 "last_motion_result",
             ):

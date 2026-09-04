@@ -37,6 +37,7 @@ void DGControl::_ConnectedCallback()
 void DGControl::_DisconnectedCallback()
 {
     getInstance()->_g_connected.store(false);
+    std::cerr << "DGSDK disconnected callback\n";
 }
 
 void DGControl::_ReceivedGripperDataCallback(ReceivedGripperData data)
@@ -84,7 +85,7 @@ void DGControl::_setCallbacks()
 
 // --------------------------------------------------------------------------------
 
-void DGControl::start()
+void DGControl::start(bool servoKeepalive)
 {
     int success = 0;
     DG_RESULT result;
@@ -134,12 +135,28 @@ void DGControl::start()
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
+    // Capture the real pose before activating the servo system.  A DISARMED
+    // hardware session will keep only this pose alive; it must never inherit
+    // the firmware's default all-zero target.
+    std::memcpy(_tempPos, _g_gripperData.joint, sizeof(_g_gripperData.joint));
+    _tempPos[16] = 0.0;
+    _servoKeepaliveEnabled.store(servoKeepalive);
+    _temperatureSafe.store(false);
+    _lastMotionResult.store(DG_RESULT_NONE);
+
     result = SystemStart();
     std::cout << "SystemStart: " << result << "\n";
     success += result;
+    _systemStarted.store(result == DG_RESULT_NONE);
 
-    _temperatureSafe.store(false);
-    _lastMotionResult.store(DG_RESULT_NONE);
+    // Developer mode drops its control session if it receives no servo
+    // traffic.  Immediately hold the measured pose, then refresh that same
+    // safe setpoint until the first high-level target arrives.
+    if (servoKeepalive && result == DG_RESULT_NONE)
+    {
+        result = MoveServoJoint(_tempPos);
+        _lastMotionResult.store(static_cast<int>(result));
+    }
 
     // --------------------------
 
@@ -155,8 +172,6 @@ void DGControl::start()
     SetMotionTimeAllEqual(300);
 
     // --------------------------
-
-    std::memcpy(_tempPos, _g_gripperData.joint, sizeof(_g_gripperData.joint));
 
     // A DGControl instance is a process-wide singleton.  Never replay a
     // target left from a previous start/stop cycle.
@@ -174,7 +189,7 @@ void DGControl::stop()
     _controlRunning.store(false);
     _temperatureSafe.store(false);
     _g_commPeriod.store(0);
-    SystemStop();
+    if (_systemStarted.exchange(false)) SystemStop();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     DisconnectToGripper();
 
@@ -235,7 +250,10 @@ void DGControl::_loop()
         {
             eigenArray2Array(_msgTargetPos, _targetPos);
             _updatePos();
+        }
 
+        if (temperatureSafe && (hasTarget || _servoKeepaliveEnabled.load()))
+        {
             _tempPos[16] = 0.0;         // Зануление для безопасности дефектного 16 джоинта
             const DG_RESULT result = MoveServoJoint(_tempPos);
             _lastMotionResult.store(static_cast<int>(result));
@@ -343,9 +361,19 @@ bool DGControl::isControlRunning() const
     return _controlRunning.load();
 }
 
+bool DGControl::isSystemStarted() const
+{
+    return _systemStarted.load();
+}
+
 bool DGControl::isTemperatureSafe() const
 {
     return _temperatureSafe.load();
+}
+
+bool DGControl::isServoKeepaliveEnabled() const
+{
+    return _servoKeepaliveEnabled.load();
 }
 
 int DGControl::getCommunicationRateHz() const

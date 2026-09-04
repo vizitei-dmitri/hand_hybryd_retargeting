@@ -159,7 +159,9 @@ def test_rejected_command_reports_low_level_control_status(monkeypatch):
         control_status={
             "connected": False,
             "control_running": False,
+            "system_started": True,
             "temperature_safe": False,
+            "servo_keepalive_enabled": True,
             "communication_rate_hz": 200,
             "last_motion_result": 7,
         },
@@ -172,7 +174,8 @@ def test_rejected_command_reports_low_level_control_status(monkeypatch):
     with pytest.raises(
         RuntimeError,
         match=(
-            r"connected=False, control_running=False, temperature_safe=False, "
+            r"connected=False, control_running=False, system_started=True, "
+            r"temperature_safe=False, servo_keepalive_enabled=True, "
             r"communication_rate_hz=200, last_motion_result=7"
         ),
     ):

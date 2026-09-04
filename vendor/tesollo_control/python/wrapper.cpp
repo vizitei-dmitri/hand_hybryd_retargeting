@@ -24,7 +24,11 @@ PYBIND11_MODULE(dg5f_python, m)
             &DGControl::getInstance,
             py::return_value_policy::reference
         )
-        .def("start", &DGControl::start)
+        .def(
+            "start",
+            &DGControl::start,
+            py::arg("servo_keepalive") = true
+        )
         .def("stop", &DGControl::stop)
         .def("set_target_position",
             [](handcontrol::DGControl& self,
@@ -102,7 +106,9 @@ PYBIND11_MODULE(dg5f_python, m)
                 py::dict status;
                 status["connected"] = self.isConnected();
                 status["control_running"] = self.isControlRunning();
+                status["system_started"] = self.isSystemStarted();
                 status["temperature_safe"] = self.isTemperatureSafe();
+                status["servo_keepalive_enabled"] = self.isServoKeepaliveEnabled();
                 status["communication_rate_hz"] = self.getCommunicationRateHz();
                 status["last_motion_result"] = self.getLastMotionResult();
                 return status;
