@@ -137,12 +137,27 @@ class TesolloDg5fBackend:
         # setpoint; never enqueue a burst of stale intermediate commands.
         time.sleep(0.002)
         if not bool(self._api.set_target_position(command)):
-            temperature_context = "check connection and temperatures"
+            diagnostic_parts = []
+            try:
+                status = self.read_control_status()
+                if status:
+                    diagnostic_parts.extend(
+                        [
+                            f"connected={status.get('connected')}",
+                            f"control_running={status.get('control_running')}",
+                            f"temperature_safe={status.get('temperature_safe')}",
+                            "communication_rate_hz="
+                            f"{status.get('communication_rate_hz')}",
+                            f"last_motion_result={status.get('last_motion_result')}",
+                        ]
+                    )
+            except Exception:
+                pass
             try:
                 temperature = self._read_latest("get_current_temp", 16)
                 if temperature is not None:
                     hottest_index = int(np.argmax(temperature))
-                    temperature_context = (
+                    diagnostic_parts.append(
                         f"hottest {JOINT_NAMES[hottest_index]}="
                         f"{float(temperature[hottest_index]):.1f} C; "
                         f"DGSDK motion limit={TESOLLO_TEMPERATURE_LIMIT_C:.1f} C"
@@ -151,10 +166,22 @@ class TesolloDg5fBackend:
                 # Queue failure remains authoritative even if diagnostic
                 # telemetry is unavailable or the connection is disappearing.
                 pass
+            context = ", ".join(diagnostic_parts)
+            if not context:
+                context = "check connection and temperatures"
             raise RuntimeError(
-                "Tesollo target queue remained full; the SDK control loop is "
-                f"not consuming commands ({temperature_context})"
+                "Tesollo rejected the position target twice "
+                f"({context})"
             )
+
+    def read_control_status(self) -> dict[str, object]:
+        """Return low-level loop health when supported by the SDK binding."""
+        if not self._connected or self._api is None:
+            raise RuntimeError("Tesollo DG5F backend is not connected")
+        get_status = getattr(self._api, "get_control_status", None)
+        if get_status is None:
+            return {}
+        return dict(get_status())
 
     def _read_latest(
         self, method_name: str, drain_limit: int

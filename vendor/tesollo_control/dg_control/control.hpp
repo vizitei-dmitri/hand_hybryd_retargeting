@@ -12,6 +12,7 @@
 #include <mutex>
 #include <functional>
 #include <atomic>
+#include <algorithm>
 
 #include <Eigen/Dense>
 
@@ -36,6 +37,9 @@ private:
     DiagnosisSystem _g_diagnosisData{};
     std::atomic<int> _g_commPeriod{0};
     std::atomic<int> _g_processing{0};
+    std::atomic<bool> _controlRunning{false};
+    std::atomic<bool> _temperatureSafe{false};
+    std::atomic<int> _lastMotionResult{DG_RESULT_NONE};
 
     // ----------------- Connections
     char _ip[MAX_GRIPPER_IP_ADDRESS_SIZE] = "169.254.186.72";
@@ -139,6 +143,12 @@ public:
     bool getCurrentCurrent(float* c_current);
     bool getCurrentVelocity(float* c_velocity);
     bool getCurrentTemperature(float* c_temperature);
+
+    bool isConnected() const;
+    bool isControlRunning() const;
+    bool isTemperatureSafe() const;
+    int getCommunicationRateHz() const;
+    int getLastMotionResult() const;
 
 };
 

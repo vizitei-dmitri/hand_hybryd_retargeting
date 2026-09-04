@@ -24,10 +24,11 @@ class EndlessFeedbackApi:
 
 
 class CommandQueueApi:
-    def __init__(self, results, temperature=None):
+    def __init__(self, results, temperature=None, control_status=None):
         self.results = iter(results)
         self.commands = []
         self.temperature = temperature
+        self.control_status = control_status
 
     def set_target_position(self, command):
         self.commands.append(np.asarray(command).copy())
@@ -37,6 +38,11 @@ class CommandQueueApi:
         if self.temperature is None:
             return False, np.zeros(20, dtype=np.float32)
         return True, np.asarray(self.temperature, dtype=np.float32)
+
+    def get_control_status(self):
+        if self.control_status is None:
+            raise RuntimeError("status unavailable")
+        return self.control_status
 
 
 class StaleFeedbackBackend:
@@ -126,7 +132,7 @@ def test_persistent_command_queue_rejection_reports_stalled_sdk(monkeypatch):
     backend._connected = True
     monkeypatch.setattr("lerobot_robot_dg5f.backends.time.sleep", lambda _: None)
 
-    with pytest.raises(RuntimeError, match="control loop is not consuming"):
+    with pytest.raises(RuntimeError, match="rejected the position target twice"):
         backend.send_positions(np.zeros(20))
 
     assert len(api.commands) == 2
@@ -143,6 +149,32 @@ def test_persistent_queue_rejection_reports_hottest_joint(monkeypatch):
 
     with pytest.raises(
         RuntimeError, match=r"hottest rj_dg_2_4=68.5 C; DGSDK motion limit=65.0 C"
+    ):
+        backend.send_positions(np.zeros(20))
+
+
+def test_rejected_command_reports_low_level_control_status(monkeypatch):
+    api = CommandQueueApi(
+        (False, False),
+        control_status={
+            "connected": False,
+            "control_running": False,
+            "temperature_safe": False,
+            "communication_rate_hz": 200,
+            "last_motion_result": 7,
+        },
+    )
+    backend = TesolloDg5fBackend("127.0.0.1", 502, 1)
+    backend._api = api
+    backend._connected = True
+    monkeypatch.setattr("lerobot_robot_dg5f.backends.time.sleep", lambda _: None)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"connected=False, control_running=False, temperature_safe=False, "
+            r"communication_rate_hz=200, last_motion_result=7"
+        ),
     ):
         backend.send_positions(np.zeros(20))
 

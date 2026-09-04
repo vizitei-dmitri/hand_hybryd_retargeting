@@ -253,8 +253,6 @@ class Dg5fLeRobotBridge(Node):
     def _send_latest(self) -> None:
         if not self._armed or self._latest_command_deg is None:
             return
-        if bool(self.get_parameter("require_tracking").value) and not self._tracking_ok:
-            return
         timeout = float(self.get_parameter("command_timeout").value)
         if not command_is_fresh(
             self._last_command_time, self._now_seconds(), timeout
@@ -262,6 +260,8 @@ class Dg5fLeRobotBridge(Node):
             self._armed = False
             self._robot.hold_position()
             self._warn_throttled("Command timeout: LeRobot output was disarmed")
+            return
+        if bool(self.get_parameter("require_tracking").value) and not self._tracking_ok:
             return
 
         action = {

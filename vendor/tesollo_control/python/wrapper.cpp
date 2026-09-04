@@ -95,6 +95,18 @@ PYBIND11_MODULE(dg5f_python, m)
 
                 return py::make_tuple(ok, arr);
             }
+        )
+        .def("get_control_status",
+            [](const handcontrol::DGControl& self)
+            {
+                py::dict status;
+                status["connected"] = self.isConnected();
+                status["control_running"] = self.isControlRunning();
+                status["temperature_safe"] = self.isTemperatureSafe();
+                status["communication_rate_hz"] = self.getCommunicationRateHz();
+                status["last_motion_result"] = self.getLastMotionResult();
+                return status;
+            }
         );
 
     auto poses = m.def_submodule("poses");

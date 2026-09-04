@@ -193,6 +193,11 @@ bash scripts/stack.sh hardware 10000 hybrid 169.254.186.72
 `2 s`, hardware backend завершится и включить движение будет невозможно. В
 другом терминале проверьте состояние:
 
+Низкоуровневая обёртка не вызывает `MoveServoJoint()` до получения первой
+реальной position-команды после `arm`. Частота, сообщаемая DGSDK, трактуется
+как Hz, а внутренний adapter loop ограничен безопасными `200 Hz`; входные
+setpoint по-прежнему формируются LeRobot с частотой `50 Hz`.
+
 ```bash
 cd /home/yoba/Documents/work/hand_hybryd_retargeting
 bash scripts/stack.sh shell
@@ -378,7 +383,8 @@ bash scripts/stack.sh lerobot-check
 Если запуск сообщает `Address already in use`, уже остался другой endpoint на
 том же порту. Завершите старый launch через `Ctrl+C`; не запускайте mock
 `launch` перед `hardware`. Если после включения появляется сообщение
-`target queue remained full`, bridge безопасно разоружает кисть. Сначала
+`rejected the position target twice`, bridge безопасно разоружает кисть и
+выводит состояние низкоуровневого control loop. Сначала
 запустите `sdk-check`: температура `>= 65 °C` объясняет блокировку; при
 нормальной температуре нужно проверять Ethernet и внутренний control loop SDK.
 

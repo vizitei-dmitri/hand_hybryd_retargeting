@@ -66,6 +66,26 @@ def main() -> int:
             "Temperature safety check: OK "
             f"(< {TESOLLO_TEMPERATURE_LIMIT_C:.1f} C)"
         )
+
+        status = backend.read_control_status()
+        if status:
+            print("DGControl status:")
+            for key in (
+                "connected",
+                "control_running",
+                "temperature_safe",
+                "communication_rate_hz",
+                "last_motion_result",
+            ):
+                print(f"  {key}: {status.get(key)}")
+            if not (
+                status.get("connected")
+                and status.get("control_running")
+                and status.get("temperature_safe")
+                and status.get("last_motion_result") == 0
+            ):
+                print("UNSAFE: the low-level DGControl loop is not motion-ready")
+                return 4
         return 0
     finally:
         backend.disconnect()

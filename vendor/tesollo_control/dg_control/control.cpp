@@ -138,6 +138,9 @@ void DGControl::start()
     std::cout << "SystemStart: " << result << "\n";
     success += result;
 
+    _temperatureSafe.store(false);
+    _lastMotionResult.store(DG_RESULT_NONE);
+
     // --------------------------
 
 	for(int i=0;i<MAX_JOINT_COUNT;i++)
@@ -155,31 +158,48 @@ void DGControl::start()
 
     std::memcpy(_tempPos, _g_gripperData.joint, sizeof(_g_gripperData.joint));
 
+    // A DGControl instance is a process-wide singleton.  Never replay a
+    // target left from a previous start/stop cycle.
+    while (_target_joint_buffer.pop(_msgTargetPos)) {}
+
     _control = std::jthread(&DGControl::_loop, this);
 }
 
 void DGControl::stop()
 {
-    if (_g_connected.load()) 
-    {
-        MoveJointAll(_currentPos); // Чтобы пальцы после выключения не двигались
+    // Do not send a position command during shutdown.  In particular, a
+    // DISARMED high-level controller must never cause an implicit movement.
+    _g_connected.store(false);
+    if (_control.joinable()) _control.join();
+    _controlRunning.store(false);
+    _temperatureSafe.store(false);
+    _g_commPeriod.store(0);
+    SystemStop();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    DisconnectToGripper();
 
-        _g_connected.store(false);
-        if (_control.joinable()) _control.join();
-        _g_commPeriod.store(0);
-        SystemStop();
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        DisconnectToGripper();
-
-        std::cout << "Disconnected\n"; 
-    }
+    std::cout << "Disconnected\n";
 }
 
 // --------------------------------------------------------------------------------
 
 void DGControl::_loop()
 {
+    // DGSDK documents the callback value as communication frequency in Hz,
+    // not as a duration in microseconds.  Cap this adapter loop at 200 Hz;
+    // Python supplies new position setpoints at 50 Hz.
+    constexpr int maxControlRateHz = 200;
+    const int reportedRateHz = std::max(1, _g_commPeriod.load());
+    const int controlRateHz = std::min(reportedRateHz, maxControlRateHz);
+    const auto controlPeriod = std::chrono::nanoseconds(
+        1'000'000'000LL / controlRateHz
+    );
+
+    std::cout << "DGControl loop: SDK=" << reportedRateHz
+              << " Hz, adapter=" << controlRateHz << " Hz\n";
+
     auto next = std::chrono::steady_clock::now();
+    _controlRunning.store(true);
 
     while(_g_connected.load())
     {
@@ -198,26 +218,30 @@ void DGControl::_loop()
         _current_velocity_buffer.push(_msgCurrentVel);
         _current_temperature_buffer.push(_msgCurrentTemp);
 
-        if (_checkTemp())
-        {
-            // Position commands are setpoints, not a trajectory queue.  Drain
-            // all pending commands so a temporary producer/consumer mismatch
-            // cannot build latency by replaying stale targets.
-            bool hasTarget = false;
-            while (_target_joint_buffer.pop(_msgTargetPos))
-            {
-                hasTarget = true;
-            }
-            if (hasTarget) eigenArray2Array(_msgTargetPos, _targetPos);
+        const bool temperatureSafe = _checkTemp();
+        _temperatureSafe.store(temperatureSafe);
 
+        // Always consume the mailbox.  If motion is unsafe, discard pending
+        // targets so they cannot execute later after the fault clears.
+        bool hasTarget = false;
+        while (_target_joint_buffer.pop(_msgTargetPos))
+        {
+            hasTarget = true;
+        }
+
+        // Do not call MoveServoJoint before the first accepted target.  This
+        // is what makes connect() and DISARMED genuinely motion-free.
+        if (hasTarget && temperatureSafe)
+        {
+            eigenArray2Array(_msgTargetPos, _targetPos);
             _updatePos();
 
             _tempPos[16] = 0.0;         // Зануление для безопасности дефектного 16 джоинта
-            MoveServoJoint(_tempPos); 
+            const DG_RESULT result = MoveServoJoint(_tempPos);
+            _lastMotionResult.store(static_cast<int>(result));
         }
-        
 
-        next += std::chrono::microseconds(_g_commPeriod);
+        next += controlPeriod;
         const auto now = std::chrono::steady_clock::now();
         if (next < now)
         {
@@ -226,6 +250,9 @@ void DGControl::_loop()
         }
         std::this_thread::sleep_until(next);
     }
+
+    _controlRunning.store(false);
+    _temperatureSafe.store(false);
 }
 
 void DGControl::_updatePos()
@@ -256,6 +283,12 @@ bool DGControl::_checkTemp()
 
 bool DGControl::setTragetPosition(const Eigen::Array<double,MAX_JOINT_COUNT,1> &position)
 {
+    if (!_g_connected.load() || !_controlRunning.load() ||
+        !_temperatureSafe.load() ||
+        _lastMotionResult.load() != DG_RESULT_NONE)
+    {
+        return false;
+    }
     return _target_joint_buffer.push(position);
 }
 
@@ -283,6 +316,13 @@ bool DGControl::getCurrentTemperature(Eigen::Array<double,MAX_JOINT_COUNT,1> &te
 
 bool DGControl::setTragetPosition(const float* position)
 {
+    if (!_g_connected.load() || !_controlRunning.load() ||
+        !_temperatureSafe.load() ||
+        _lastMotionResult.load() != DG_RESULT_NONE)
+    {
+        return false;
+    }
+
     Eigen::Array<double,MAX_JOINT_COUNT,1> array;
 
     for(int8_t i = 0; i < MAX_JOINT_COUNT; ++i)
@@ -291,6 +331,31 @@ bool DGControl::setTragetPosition(const float* position)
     }
     
     return _target_joint_buffer.push(array);
+}
+
+bool DGControl::isConnected() const
+{
+    return _g_connected.load();
+}
+
+bool DGControl::isControlRunning() const
+{
+    return _controlRunning.load();
+}
+
+bool DGControl::isTemperatureSafe() const
+{
+    return _temperatureSafe.load();
+}
+
+int DGControl::getCommunicationRateHz() const
+{
+    return _g_commPeriod.load();
+}
+
+int DGControl::getLastMotionResult() const
+{
+    return _lastMotionResult.load();
 }
 
 bool DGControl::getCurrentPosition(float* position)
