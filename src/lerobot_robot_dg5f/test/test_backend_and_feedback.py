@@ -23,6 +23,22 @@ class EndlessFeedbackApi:
         return True, np.full(20, self.calls, dtype=np.float32)
 
 
+class CommandQueueApi:
+    def __init__(self, results, temperature=None):
+        self.results = iter(results)
+        self.commands = []
+        self.temperature = temperature
+
+    def set_target_position(self, command):
+        self.commands.append(np.asarray(command).copy())
+        return next(self.results)
+
+    def get_current_temp(self):
+        if self.temperature is None:
+            return False, np.zeros(20, dtype=np.float32)
+        return True, np.asarray(self.temperature, dtype=np.float32)
+
+
 class StaleFeedbackBackend:
     def __init__(self):
         self.connected = False
@@ -84,6 +100,51 @@ def test_latest_feedback_read_is_bounded():
 
     assert api.calls == 4
     assert np.array_equal(latest, np.full(20, 4.0))
+
+
+def test_transient_command_queue_rejection_retries_latest_target(monkeypatch):
+    api = CommandQueueApi((False, True))
+    backend = TesolloDg5fBackend("127.0.0.1", 502, 1)
+    backend._api = api
+    backend._connected = True
+    sleeps = []
+    monkeypatch.setattr("lerobot_robot_dg5f.backends.time.sleep", sleeps.append)
+
+    target = np.arange(20, dtype=np.float64)
+    backend.send_positions(target)
+
+    assert sleeps == [0.002]
+    assert len(api.commands) == 2
+    assert np.array_equal(api.commands[0], target.astype(np.float32))
+    assert np.array_equal(api.commands[1], target.astype(np.float32))
+
+
+def test_persistent_command_queue_rejection_reports_stalled_sdk(monkeypatch):
+    api = CommandQueueApi((False, False))
+    backend = TesolloDg5fBackend("127.0.0.1", 502, 1)
+    backend._api = api
+    backend._connected = True
+    monkeypatch.setattr("lerobot_robot_dg5f.backends.time.sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="control loop is not consuming"):
+        backend.send_positions(np.zeros(20))
+
+    assert len(api.commands) == 2
+
+
+def test_persistent_queue_rejection_reports_hottest_joint(monkeypatch):
+    temperature = np.full(20, 31.0)
+    temperature[7] = 68.5
+    api = CommandQueueApi((False, False), temperature=temperature)
+    backend = TesolloDg5fBackend("127.0.0.1", 502, 1)
+    backend._api = api
+    backend._connected = True
+    monkeypatch.setattr("lerobot_robot_dg5f.backends.time.sleep", lambda _: None)
+
+    with pytest.raises(
+        RuntimeError, match=r"hottest rj_dg_2_4=68.5 C; DGSDK motion limit=65.0 C"
+    ):
+        backend.send_positions(np.zeros(20))
 
 
 def test_stale_feedback_does_not_reseed_command_trajectory():

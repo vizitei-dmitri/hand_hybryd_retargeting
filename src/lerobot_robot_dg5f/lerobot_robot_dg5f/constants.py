@@ -35,3 +35,6 @@ BROKEN_PINKY_JOINT = "rj_dg_5_1"
 BROKEN_PINKY_INDEX = JOINT_NAMES.index(BROKEN_PINKY_JOINT)
 
 TELEMETRY_FIELDS = ("pos", "vel", "current", "temp")
+
+# DGControl::_checkTemp() stops consuming motion targets at this threshold.
+TESOLLO_TEMPERATURE_LIMIT_C = 65.0

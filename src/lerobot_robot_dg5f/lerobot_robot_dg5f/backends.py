@@ -5,7 +5,11 @@ from typing import Optional, Protocol
 
 import numpy as np
 
-from .constants import JOINT_NAMES, TELEMETRY_FIELDS
+from .constants import (
+    JOINT_NAMES,
+    TELEMETRY_FIELDS,
+    TESOLLO_TEMPERATURE_LIMIT_C,
+)
 
 
 class Dg5fBackend(Protocol):
@@ -126,8 +130,31 @@ class TesolloDg5fBackend:
             raise ValueError(f"Expected {len(JOINT_NAMES)} DG5F positions")
         if not np.all(np.isfinite(command)):
             raise ValueError("DG5F positions must be finite")
+        if bool(self._api.set_target_position(command)):
+            return
+        # A single rejection can be a producer/consumer boundary race. Give
+        # the SDK loop one short opportunity to consume and retry the latest
+        # setpoint; never enqueue a burst of stale intermediate commands.
+        time.sleep(0.002)
         if not bool(self._api.set_target_position(command)):
-            raise RuntimeError("Tesollo command queue rejected the target")
+            temperature_context = "check connection and temperatures"
+            try:
+                temperature = self._read_latest("get_current_temp", 16)
+                if temperature is not None:
+                    hottest_index = int(np.argmax(temperature))
+                    temperature_context = (
+                        f"hottest {JOINT_NAMES[hottest_index]}="
+                        f"{float(temperature[hottest_index]):.1f} C; "
+                        f"DGSDK motion limit={TESOLLO_TEMPERATURE_LIMIT_C:.1f} C"
+                    )
+            except Exception:
+                # Queue failure remains authoritative even if diagnostic
+                # telemetry is unavailable or the connection is disappearing.
+                pass
+            raise RuntimeError(
+                "Tesollo target queue remained full; the SDK control loop is "
+                f"not consuming commands ({temperature_context})"
+            )
 
     def _read_latest(
         self, method_name: str, drain_limit: int

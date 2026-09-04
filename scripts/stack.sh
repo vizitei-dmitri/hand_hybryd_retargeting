@@ -76,6 +76,24 @@ mode_config() {
   echo "/workspace/src/dg5f_teleop/config/dg5f_${mode}.yaml"
 }
 
+ensure_pipeline_slot_free() {
+  local tcp_port=$1
+  local running
+  running=$("${compose[@]}" exec -T "${service}" bash -lc \
+    "pgrep -af '[r]os2 launch dg5f_unity_teleop unity_dg5f.launch.py' || true")
+  if [[ -n "${running}" ]]; then
+    echo "Another DG5F pipeline is already running:" >&2
+    echo "${running}" >&2
+    echo "Stop its terminal with Ctrl+C before starting another mode." >&2
+    return 1
+  fi
+  if ss -H -ltn "sport = :${tcp_port}" | grep -q .; then
+    echo "TCP port ${tcp_port} is already in use." >&2
+    echo "Stop the old RSL endpoint or choose another port." >&2
+    return 1
+  fi
+}
+
 case "${1:-help}" in
   setup)
     "${script_path}" build
@@ -126,6 +144,7 @@ case "${1:-help}" in
   launch|headless)
     require_container
     tcp_port="${2:-${RSL_TCP_PORT:-10000}}"
+    ensure_pipeline_slot_free "${tcp_port}"
     retarget_mode="${3:-${DG5F_RETARGET_MODE:-hybrid}}"
     retarget_config=$(mode_config "${retarget_mode}")
     viewer=true
@@ -138,6 +157,7 @@ case "${1:-help}" in
   hardware|hardware-headless)
     require_container
     tcp_port="${2:-${RSL_TCP_PORT:-10000}}"
+    ensure_pipeline_slot_free "${tcp_port}"
     retarget_mode="${3:-${DG5F_RETARGET_MODE:-hybrid}}"
     hand_ip="${4:-${DG5F_HAND_IP:-169.254.186.72}}"
     retarget_config=$(mode_config "${retarget_mode}")
@@ -174,6 +194,7 @@ case "${1:-help}" in
   endpoint)
     require_container
     tcp_port="${2:-${RSL_TCP_PORT:-10000}}"
+    ensure_pipeline_slot_free "${tcp_port}"
     "${compose[@]}" exec "${service}" bash -lc \
       "${source_workspace}; ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=0.0.0.0 -p ROS_TCP_PORT:=${tcp_port}"
     ;;
