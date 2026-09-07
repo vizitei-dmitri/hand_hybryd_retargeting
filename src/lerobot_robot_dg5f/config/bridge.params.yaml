@@ -9,6 +9,7 @@ dg5f_lerobot_bridge:
     armed_topic: /dg5f/lerobot/armed
     diagnostics_topic: /dg5f/lerobot/diagnostics
     enable_service: /dg5f/lerobot/enable
+    recover_service: /dg5f/lerobot/recover
     backend: mock
     ip: 169.254.186.72
     port: 502
@@ -24,6 +25,12 @@ dg5f_lerobot_bridge:
     filter_tau_s: 0.05
     target_deadband_deg: 0.20
     min_send_step_deg: 0.0
+    # Direct mode remains fast, but one 50 Hz command may move a joint by at
+    # most 5 deg (~250 deg/s equivalent). This blocks 50-90 deg one-frame jumps.
+    max_direct_step_deg: 5.0
+    # On each ARM, blend from the last accepted physical setpoint toward the
+    # live VR target before entering fully direct tracking.
+    startup_blend_s: 0.70
     max_dt_s: 0.05
     initial_feedback_timeout_s: 2.0
     telemetry_drain_limit: 16

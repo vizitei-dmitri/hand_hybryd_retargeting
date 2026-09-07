@@ -24,6 +24,8 @@ class Dg5fConfig(RobotConfig):
     filter_tau_s: float = 0.05
     target_deadband_deg: float = 0.20
     min_send_step_deg: float = 0.20
+    max_direct_step_deg: float = 5.0
+    startup_blend_s: float = 0.70
     max_dt_s: float = 0.05
     initial_feedback_timeout_s: float = 2.0
     telemetry_drain_limit: int = 16
@@ -55,6 +57,8 @@ class Dg5fConfig(RobotConfig):
             "filter_tau_s": self.filter_tau_s,
             "target_deadband_deg": self.target_deadband_deg,
             "min_send_step_deg": self.min_send_step_deg,
+            "max_direct_step_deg": self.max_direct_step_deg,
+            "startup_blend_s": self.startup_blend_s,
         }
         for name, value in non_negative.items():
             if not isfinite(value) or value < 0.0:

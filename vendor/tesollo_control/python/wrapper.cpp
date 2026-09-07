@@ -30,6 +30,7 @@ PYBIND11_MODULE(dg5f_python, m)
             py::arg("servo_keepalive") = true
         )
         .def("stop", &DGControl::stop)
+        .def("suspend_motion", &DGControl::suspendMotion)
         .def("recover", [](handcontrol::DGControl& self, double timeout) {
             float pose[MAX_JOINT_COUNT];
             {

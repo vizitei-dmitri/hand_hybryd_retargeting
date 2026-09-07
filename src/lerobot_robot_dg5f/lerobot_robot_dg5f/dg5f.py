@@ -86,6 +86,8 @@ class Dg5f(Robot):
             filter_tau_s=config.filter_tau_s,
             target_deadband_deg=config.target_deadband_deg,
             min_send_step_deg=config.min_send_step_deg,
+            max_direct_step_deg=config.max_direct_step_deg,
+            startup_blend_s=config.startup_blend_s,
             max_dt_s=config.max_dt_s,
             **shaper_kwargs,
         )
@@ -176,21 +178,48 @@ class Dg5f(Robot):
         return status
 
     def prepare_arm(self) -> bool:
-        """Preflight and explicit recovery only; never reseed normal teleop."""
+        """Passive arm preflight.
+
+        This method is deliberately side-effect free for the physical hand: it
+        must never call DGSDK recovery, ``SystemStart`` or send a position.  A
+        faulted session has to be recovered explicitly via :meth:`recover`.
+        """
         status = self.get_diagnostics()
         if not status.get("transport_connected", False):
             raise RuntimeError("DGSDK transport not connected")
-        recovered = False
-        if status.get("recovery_required", False) or not status.get("motion_ready", False):
-            pose = self.backend.recover(self.config.initial_feedback_timeout_s)
-            pose = apply_disabled_joints(pose, self.config.disabled_joint_positions_deg)
-            self.command_shaper.reset(pose)
-            self._telemetry["pos"] = pose.copy()
-            recovered = True
+        if not status.get("control_thread_alive", status.get("control_running", False)):
+            raise RuntimeError("DGSDK control thread is not alive")
+        if not status.get("telemetry_valid", False):
+            raise RuntimeError("DGSDK telemetry is stale; run explicit recover first")
+        if not status.get("temperature_safe", False):
+            raise RuntimeError("DGSDK temperature is unsafe")
+        if not status.get("system_started", False):
+            raise RuntimeError("DGSDK system is not started; run explicit recover first")
+        if status.get("recovery_required", False):
+            raise RuntimeError("DGSDK recovery is required; run explicit recover first")
+        if not status.get("motion_ready", False):
+            raise RuntimeError(str(status.get("motion_ready_reason", "SDK_NOT_MOTION_READY")))
+        return False
+
+    def recover(self) -> np.ndarray:
+        """Explicitly recover a faulted DGSDK session while remaining disarmed.
+
+        Recovery is the *only* path allowed to reseed the software command
+        state from measured feedback.  The low-level backend first waits for a
+        fresh physical pose before it may restart the servo system.
+        """
+        pose = self.backend.recover(self.config.initial_feedback_timeout_s)
+        pose = apply_disabled_joints(pose, self.config.disabled_joint_positions_deg)
+        self.command_shaper.reset(pose)
+        self._telemetry["pos"] = pose.copy()
         status = self.get_diagnostics()
         if not status.get("motion_ready", False):
             raise RuntimeError(str(status.get("motion_ready_reason", "SDK_NOT_MOTION_READY")))
-        return recovered
+        return pose.copy()
+
+    def begin_arm_blend(self) -> None:
+        """Prepare a software-only blend before enabling live hardware output."""
+        self.command_shaper.begin_arm_blend()
 
     def send_action(self, action: RobotAction) -> RobotAction:
         if not self.is_connected:
@@ -222,9 +251,11 @@ class Dg5f(Robot):
         }
 
     def hold_position(self) -> None:
-        """Cancel internal motion without sending any new hardware setpoint."""
+        """Cancel motion and stop low-level keepalive without a new setpoint."""
         if self.command_shaper.is_initialized:
             self.command_shaper.hold()
+        if self.is_connected:
+            self.backend.suspend_motion()
 
     def disconnect(self) -> None:
         if self.is_connected:

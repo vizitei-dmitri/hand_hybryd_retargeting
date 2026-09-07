@@ -79,15 +79,22 @@ def main() -> int:
                 "connected",
                 "control_running",
                 "system_started",
+                "telemetry_valid",
+                "motion_ready",
+                "motion_ready_reason",
                 "temperature_safe",
                 "servo_keepalive_enabled",
                 "communication_rate_hz",
+                "latest_command_valid",
                 "last_motion_result",
             ):
                 print(f"  {key}: {status.get(key)}")
             if not (
                 status.get("connected")
                 and status.get("control_running")
+                and status.get("system_started")
+                and status.get("telemetry_valid")
+                and status.get("motion_ready")
                 and status.get("temperature_safe")
                 and status.get("last_motion_result") == 0
             ):

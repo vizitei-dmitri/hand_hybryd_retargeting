@@ -14,6 +14,8 @@ def make_shaper(**overrides):
         "filter_tau_s": 0.05,
         "target_deadband_deg": 0.20,
         "min_send_step_deg": 0.20,
+        "max_direct_step_deg": 5.0,
+        "startup_blend_s": 0.70,
         "max_dt_s": 0.05,
     }
     settings.update(overrides)
@@ -143,3 +145,58 @@ def test_hold_returns_to_last_accepted_setpoint_without_sending():
 
     assert np.array_equal(shaper.command_pose_deg, shaper.effective_command())
     assert np.array_equal(shaper.velocity_deg_s, np.zeros(20))
+
+
+def test_direct_mode_caps_one_frame_jump_without_slow_acceleration_ramp():
+    shaper = make_shaper(
+        smoothing=False,
+        min_send_step_deg=0.0,
+        max_direct_step_deg=5.0,
+        startup_blend_s=0.0,
+        disabled_positions_deg={},
+    )
+    shaper.reset(np.zeros(20), now=0.0)
+
+    first = shaper.step(np.full(20, 90.0), now=0.02)
+    assert np.allclose(first.command_deg, 5.0)
+    shaper.accept_output(first.output_deg)
+
+    second = shaper.step(np.full(20, 90.0), now=0.04)
+    assert np.allclose(second.command_deg, 10.0)
+
+
+def test_arm_blend_spreads_large_initial_vr_offset_over_time():
+    shaper = make_shaper(
+        smoothing=False,
+        min_send_step_deg=0.0,
+        max_direct_step_deg=5.0,
+        startup_blend_s=0.70,
+        disabled_positions_deg={},
+    )
+    shaper.reset(np.zeros(20), now=0.0)
+    shaper.begin_arm_blend(now=0.0)
+
+    first = shaper.step(np.full(20, 90.0), now=0.02)
+    assert np.all(first.command_deg < 5.0)
+    assert first.command_deg[0] == pytest.approx(90.0 * 0.02 / 0.70)
+
+    for tick in range(2, 36):
+        step = shaper.step(np.full(20, 90.0), now=tick * 0.02)
+        shaper.accept_output(step.output_deg)
+
+    assert np.allclose(step.command_deg, 90.0)
+    assert not shaper.arm_blend_active
+
+
+def test_hold_cancels_arm_blend():
+    shaper = make_shaper(
+        smoothing=False,
+        min_send_step_deg=0.0,
+        startup_blend_s=0.70,
+    )
+    shaper.reset(np.zeros(20), now=0.0)
+    shaper.begin_arm_blend(now=0.0)
+    assert shaper.arm_blend_active
+
+    shaper.hold(now=0.01)
+    assert not shaper.arm_blend_active

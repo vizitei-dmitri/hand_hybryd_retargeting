@@ -8,7 +8,7 @@ import rclpy
 import yaml
 from rclpy.executors import SingleThreadedExecutor
 from std_msgs.msg import Bool
-from std_srvs.srv import SetBool
+from std_srvs.srv import SetBool, Trigger
 
 from lerobot_robot_dg5f import Dg5f, Dg5fConfig
 from lerobot_robot_dg5f.backends import MockDg5fBackend, TesolloDg5fBackend
@@ -36,17 +36,25 @@ class RecoveryBackend(MockDg5fBackend):
         return self._positions.copy()
 
 
-def test_arm_recovery_resets_only_in_explicit_path():
+def test_arm_is_passive_and_recovery_is_explicit():
     robot = Dg5f(Dg5fConfig(backend="mock"))
     robot.backend = RecoveryBackend()
     robot.connect()
     before = robot.command_shaper.command_pose_deg.copy()
     robot.get_observation()
     np.testing.assert_array_equal(robot.command_shaper.command_pose_deg, before)
-    assert robot.prepare_arm()
+
+    # ARM preflight must never invoke backend.recover or reseed command state.
+    with pytest.raises(RuntimeError, match="recovery is required"):
+        robot.prepare_arm()
+    assert robot.backend.needed
+    np.testing.assert_array_equal(robot.command_shaper.command_pose_deg, before)
+
+    pose = robot.recover()
+    np.testing.assert_array_equal(pose, robot.backend._positions)
     np.testing.assert_array_equal(robot.command_shaper.command_pose_deg, robot.backend._positions)
     assert robot.command_shaper.command_pose_deg[16] == 0
-    assert not robot.prepare_arm()  # healthy preflight doesn't reset again
+    assert not robot.prepare_arm()  # healthy passive preflight only
     robot.disconnect()
 
 
@@ -63,16 +71,18 @@ def test_sdk_units_rpm_to_degrees_per_second():
     assert np.deg2rad(values["vel"][0]) == pytest.approx(-12 * 2 * np.pi / 60)
 
 
-def test_direct_profile_has_no_shaper_speed_ramp_and_keeps_fault_map():
+def test_direct_profile_uses_fast_step_guard_and_keeps_fault_map():
     params = yaml.safe_load((Path(__file__).parents[1] / "config/bridge.params.yaml").read_text())["dg5f_lerobot_bridge"]["ros__parameters"]
     robot = Dg5f(Dg5fConfig(
         backend="mock", control_smoothing=params["control_smoothing"],
         min_send_step_deg=params["min_send_step_deg"],
+        max_direct_step_deg=params["max_direct_step_deg"],
+        startup_blend_s=0.0,
     ))
     robot.connect()
     action = {f"{joint}.pos": 60.0 for joint in JOINT_NAMES}
     sent = robot.send_action(action)
-    assert sent["rj_dg_2_2.pos"] == 60.0
+    assert sent["rj_dg_2_2.pos"] == params["max_direct_step_deg"]
     assert sent["rj_dg_5_1.pos"] == 0.0
     assert sent["rj_dg_1_2.pos"] == 0.0  # joint limit still active
     robot.disconnect()
@@ -118,10 +128,11 @@ def test_watchdog_disarm_reason_is_sticky(bridge, failure):
     assert node._disarm_reason == failure
 
 
-def test_service_recovery_keeps_ros_callbacks_alive(bridge):
+def test_explicit_recovery_service_keeps_ros_callbacks_alive_and_stays_disarmed(bridge):
     node, executor = bridge
     backend = RecoveryBackend()
     backend.connect()
+    node._backend_name = "tesollo"
     node._robot.backend = backend
     ticks = []
 
@@ -132,14 +143,22 @@ def test_service_recovery_keeps_ros_callbacks_alive(bridge):
         node._on_tracking(Bool(data=True))
     feed()
     node.create_timer(0.01, feed)
-    client = node.create_client(SetBool, "/dg5f/lerobot/enable")
+    client = node.create_client(Trigger, "/dg5f/lerobot/recover")
     assert client.wait_for_service(timeout_sec=2)
-    future = client.call_async(SetBool.Request(data=True))
+    future = client.call_async(Trigger.Request())
     executor.spin_until_future_complete(future, timeout_sec=4)
     assert future.done()
     assert future.result().success, future.result().message
-    assert len(ticks) > 3  # service recovery didn't block telemetry/input timers
+    assert len(ticks) > 3
     assert node._recovery_state == "SUCCEEDED"
+    assert not node._armed
+
+    # A subsequent ARM is now only a passive preflight.
+    arm = node.create_client(SetBool, "/dg5f/lerobot/enable")
+    assert arm.wait_for_service(timeout_sec=2)
+    future = arm.call_async(SetBool.Request(data=True))
+    executor.spin_until_future_complete(future, timeout_sec=2)
+    assert future.result().success, future.result().message
     assert node._armed
     node._disarm("USER_REQUEST")
 

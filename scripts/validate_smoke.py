@@ -117,8 +117,8 @@ class SmokeValidator(Node):
                 if values.get("current_unit") != "mA" or values.get("raw_velocity_unit") != "rpm":
                     self.errors.append("Unexpected telemetry units in diagnostics")
                     return
-                if values.get("command_profile") != "direct":
-                    self.errors.append("Default launch did not enable direct command profile")
+                if values.get("command_profile") != "direct_guarded":
+                    self.errors.append("Default launch did not enable guarded direct command profile")
                     return
                 self.received.add("diagnostics")
 

@@ -53,6 +53,7 @@ private:
     std::atomic<std::uint64_t> _disconnectCount{0};
     std::atomic<std::uint64_t> _reconnectCount{0};
     std::atomic<std::int64_t> _lastTelemetryNs{0};
+    std::atomic<std::int64_t> _systemStartNs{0};
     std::atomic<bool> _latestCommandValid{false};
 
     std::atomic<int> _diagnosisProcess{0};
@@ -193,6 +194,7 @@ public:
     double communicationAgeMs() const;
     bool recoveryRequired() const { return _recoveryRequired.load(); }
     void recover(float* measuredPose, double timeoutSeconds = 2.0);
+    void suspendMotion();
     bool getTelemetry(float* position, float* current, float* velocity, float* temperature) const;
 
 };

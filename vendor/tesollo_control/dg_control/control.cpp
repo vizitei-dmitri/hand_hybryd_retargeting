@@ -60,6 +60,9 @@ void DGControl::_DisconnectedCallback()
         control->_disconnectCount.fetch_add(1);
         control->_recoveryRequired.store(true);
         control->_systemStarted.store(false);
+        control->_systemStartNs.store(0);
+        control->_lastTelemetryNs.store(0);
+        control->_latestCommandValid.store(false);
         std::cerr << "DGSDK disconnected callback\n";
     }
 }
@@ -70,11 +73,18 @@ void DGControl::_ReceivedGripperDataCallback(ReceivedGripperData data)
     {
         std::lock_guard<std::mutex> lock(control->_gripperDataMutex);
         control->_g_gripperData = data;
-        bool safe = true;
-        for (int i = 0; i < MAX_JOINT_COUNT; ++i)
-            safe = safe && std::isfinite(data.temperature[i]) && data.temperature[i] < control->_tempLimit;
-        control->_temperatureSafe.store(safe);
-        control->_lastTelemetryNs.store(steadyNowNs());
+        // DGSDK can invoke this callback before SystemStart with a zero-filled
+        // structure.  Keep the raw snapshot for diagnostics, but never call it
+        // valid motor telemetry until SystemStart has succeeded.
+        if (control->_systemStarted.load())
+        {
+            bool safe = true;
+            for (int i = 0; i < MAX_JOINT_COUNT; ++i)
+                safe = safe && std::isfinite(data.temperature[i]) &&
+                       data.temperature[i] < control->_tempLimit;
+            control->_temperatureSafe.store(safe);
+            control->_lastTelemetryNs.store(steadyNowNs());
+        }
     }
 }
 
@@ -131,11 +141,14 @@ void DGControl::start(bool servoKeepalive)
     _stopRequested.store(false);
     _recoveryRequired.store(false);
     _temperatureSafe.store(false);
-    int success = 0;
-    DG_RESULT result;
+    _latestCommandValid.store(false);
+    _lastTelemetryNs.store(0);
+    _systemStartNs.store(0);
+    _systemStarted.store(false);
+    _lastMotionResult.store(DG_RESULT_NONE);
+    _servoKeepaliveEnabled.store(servoKeepalive);
 
     GripperSystemSetting setting{};
-
     setting.communicationMode = COMMUNICATION_MODE_ETHERNET;
     setting.controlMode       = CONTROL_MODE_DEVELOPER;
     setting.port              = this->_port;
@@ -143,32 +156,25 @@ void DGControl::start(bool servoKeepalive)
     setting.readTimeout       = this->_readTimeout;
     std::memcpy(setting.ip, this->_ip, MAX_GRIPPER_IP_ADDRESS_SIZE);
 
-    _lastTelemetryNs.store(0);
-    _latestCommandValid.store(false);
-    _systemStarted.store(false);
-
-    result = SetGripperSystem(setting);
+    DG_RESULT result = SetGripperSystem(setting);
     std::cout << "SetGripperSystem: " << result << "\n";
-    success += result;
-
-    // --------------------------
+    if (result != DG_RESULT_NONE)
+        throw std::runtime_error("DGSDK SetGripperSystem failed: " + std::to_string(result));
 
     this->_setCallbacks();
 
-    // --------------------------
-
     result = ConnectToGripper();
     std::cout << "ConnectToGripper: " << result << "\n";
-    success += result;
+    if (result != DG_RESULT_NONE)
+        throw std::runtime_error("DGSDK ConnectToGripper failed: " + std::to_string(result));
 
     const auto connectDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (!_g_connected.load()) {
+    while (!_g_connected.load())
+    {
         if (std::chrono::steady_clock::now() >= connectDeadline)
             throw std::runtime_error("DGSDK connection timeout");
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-
-    // --------------------------
 
     GripperSetting gs{};
     gs.model = DG_MODEL_DG_5F_RIGHT;
@@ -177,61 +183,75 @@ void DGControl::start(bool servoKeepalive)
     std::memcpy(gs.receivedDataType, type, sizeof(type));
 
     result = SetGripperOption(gs);
-    success += result;
     std::cout << "SetGripperOption: " << result << "\n";
+    if (result != DG_RESULT_NONE)
+        throw std::runtime_error("DGSDK SetGripperOption failed: " + std::to_string(result));
 
-    // --------------------------
-
-    const auto telemetryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (!isTelemetryValid()) {
-        if (std::chrono::steady_clock::now() >= telemetryDeadline)
-            throw std::runtime_error("DGSDK initial telemetry timeout");
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    // Capture the real pose before activating the servo system.  A DISARMED
-    // hardware session will keep only this pose alive; it must never inherit
-    // the firmware's default all-zero target.
+    // This old DGSDK performs model/transport discovery asynchronously after
+    // SetGripperOption.  The original working driver waited for a healthy
+    // communication-rate callback before SystemStart; calling SystemStart too
+    // early can return DG_RESULT_NOT_FOUND_MODEL (111).
+    const auto readyDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (_g_commPeriod.load() < 200)
     {
-        std::lock_guard<std::mutex> lock(_gripperDataMutex);
-        std::memcpy(_tempPos, _g_gripperData.joint, sizeof(_g_gripperData.joint));
+        if (!_g_connected.load())
+            throw std::runtime_error("DGSDK disconnected during model discovery");
+        if (std::chrono::steady_clock::now() >= readyDeadline)
+            throw std::runtime_error(
+                "DGSDK model/communication discovery timeout (rate=" +
+                std::to_string(_g_commPeriod.load()) + " Hz)"
+            );
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    _tempPos[16] = 0.0;
-    _servoKeepaliveEnabled.store(servoKeepalive);
-    if (!_temperatureSafe.load()) throw std::runtime_error("DGSDK temperature unsafe");
-    _lastMotionResult.store(DG_RESULT_NONE);
 
+    // Reject every pre-SystemStart zero/stale callback.  Only a callback that
+    // arrives after successful SystemStart may seed the physical pose.
+    _lastTelemetryNs.store(0);
+    _temperatureSafe.store(false);
+    _systemStartNs.store(steadyNowNs());
     result = SystemStart();
     std::cout << "SystemStart: " << result << "\n";
-    success += result;
-    _systemStarted.store(result == DG_RESULT_NONE);
-
-    // Developer mode drops its control session if it receives no servo
-    // traffic.  Immediately hold the measured pose, then refresh that same
-    // safe setpoint until the first high-level target arrives.
-    if (servoKeepalive && result == DG_RESULT_NONE)
+    if (result != DG_RESULT_NONE)
     {
-        result = MoveServoJoint(_tempPos);
-        _lastMotionResult.store(static_cast<int>(result));
+        _systemStartNs.store(0);
+        throw std::runtime_error("DGSDK SystemStart failed: " + std::to_string(result));
+    }
+    _systemStarted.store(true);
+
+    const auto telemetryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!isTelemetryValid())
+    {
+        if (!_g_connected.load())
+            throw std::runtime_error("DGSDK disconnected before post-SystemStart telemetry");
+        if (std::chrono::steady_clock::now() >= telemetryDeadline)
+            throw std::runtime_error("DGSDK post-SystemStart telemetry timeout");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
-    // --------------------------
+    // We now have a real physical sample.  Seed the future command state from
+    // it, but DO NOT send MoveServoJoint while the bridge is DISARMED.
+    {
+        std::lock_guard<std::mutex> lock(_gripperDataMutex);
+        for (int i = 0; i < MAX_JOINT_COUNT; ++i)
+        {
+            if (!std::isfinite(_g_gripperData.joint[i]))
+                throw std::runtime_error("DGSDK returned invalid joint telemetry");
+            _tempPos[i] = _g_gripperData.joint[i];
+        }
+    }
+    _tempPos[16] = 0.0f;
+    if (!_temperatureSafe.load())
+        throw std::runtime_error("DGSDK temperature unsafe after SystemStart");
 
-	for(int i=0;i<MAX_JOINT_COUNT;i++)
-	{
-		_P[i] = 4.0f;   // типичные безопасные значения
-		_D[i] = 2.5f;
-	}
-
+    for (int i = 0; i < MAX_JOINT_COUNT; ++i)
+    {
+        _P[i] = 4.0f;
+        _D[i] = 2.5f;
+    }
     SetJointGainPAll(_P);
-	SetJointGainDAll(_D);
-
+    SetJointGainDAll(_D);
     SetMotionTimeAllEqual(300);
 
-    // --------------------------
-
-    // A DGControl instance is a process-wide singleton.  Never replay a
-    // target left from a previous start/stop cycle.
     while (_target_joint_buffer.pop(_msgTargetPos)) {}
 
     _control = std::jthread(&DGControl::_loop, this);
@@ -244,6 +264,9 @@ void DGControl::stop()
     _stopRequested.store(true);
     if (_control.joinable()) _control.join();
     _controlRunning.store(false);
+    _latestCommandValid.store(false);
+    _lastTelemetryNs.store(0);
+    _systemStartNs.store(0);
     _g_commPeriod.store(0);
     if (_systemStarted.exchange(false)) SystemStop();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -257,18 +280,21 @@ void DGControl::stop()
 
 void DGControl::_loop()
 {
-    // DGSDK documents the callback value as communication frequency in Hz,
-    // not as a duration in microseconds.  Cap this adapter loop at 200 Hz;
-    // Python supplies new position setpoints at 50 Hz.
-    constexpr int maxControlRateHz = 200;
-    const int reportedRateHz = std::max(1, _g_commPeriod.load());
-    const int controlRateHz = std::min(reportedRateHz, maxControlRateHz);
-    const auto controlPeriod = std::chrono::nanoseconds(
-        1'000'000'000LL / controlRateHz
-    );
+    // The DGSDK communication-rate callback is asynchronous and is often still
+    // zero/1 Hz when this thread starts.  Sampling it once here previously
+    // latched the servo/keepalive loop at 1 Hz for the lifetime of the process.
+    // That is especially dangerous with the latest-target mailbox: Python may
+    // enqueue many guarded 5-degree steps at 50 Hz, while a 1 Hz consumer drains
+    // them all and sends only the newest target as one large physical jump.
+    //
+    // Run the adapter independently at a stable 200 Hz.  DGSDK telemetry may be
+    // ~400-800 Hz and Python targets are ~50 Hz; repeating the latest safe servo
+    // setpoint at 200 Hz is the intended keepalive behaviour.
+    constexpr int controlRateHz = 200;
+    constexpr auto controlPeriod = std::chrono::nanoseconds(5'000'000LL);
 
-    std::cout << "DGControl loop: SDK=" << reportedRateHz
-              << " Hz, adapter=" << controlRateHz << " Hz\n";
+    std::cout << "DGControl loop: adapter=" << controlRateHz
+              << " Hz (SDK communication rate is asynchronous)\n";
 
     auto next = std::chrono::steady_clock::now();
     _controlRunning.store(true);
@@ -326,7 +352,11 @@ void DGControl::_loop()
             _updatePos();
         }
 
-        if (mayMove && (hasTarget || _servoKeepaliveEnabled.load()))
+        // DISARMED is physically silent.  Keepalive only becomes active
+        // after at least one high-level target has been accepted and sent.
+        const bool keepaliveActive =
+            _servoKeepaliveEnabled.load() && _latestCommandValid.load();
+        if (mayMove && (hasTarget || keepaliveActive))
         {
             _tempPos[16] = 0.0;         // Зануление для безопасности дефектного 16 джоинта
             const DG_RESULT result = MoveServoJoint(_tempPos);
@@ -494,64 +524,152 @@ bool DGControl::getTelemetry(float* position, float* current, float* velocity, f
 
 void DGControl::recover(float* measuredPose, double timeoutSeconds)
 {
-    // Only the explicit ARM path calls this. Never replay a pre-fault mailbox.
+    // Explicit recovery only; ARM never calls this path.  Recovery itself is
+    // motion-free and leaves the bridge DISARMED.
     std::lock_guard<std::mutex> lock(_motionMutex);
     _recoveryRequired.store(true);
+    _latestCommandValid.store(false);
     while (_target_joint_buffer.pop(_msgTargetPos)) {}
-    if (!_g_connected.load()) throw std::runtime_error("DGSDK transport not connected");
-    if (!_controlRunning.load()) throw std::runtime_error("control thread stopped");
-    if (!std::isfinite(timeoutSeconds) || timeoutSeconds <= 0 || timeoutSeconds > 10)
+
+    if (!_controlRunning.load())
+        throw std::runtime_error("control thread stopped");
+    if (!std::isfinite(timeoutSeconds) || timeoutSeconds <= 0.0 || timeoutSeconds > 10.0)
         throw std::runtime_error("invalid recovery timeout");
-    const auto generation = _disconnectCount.load();
-    const auto requestedAt = steadyNowNs();
-    if (!_systemStarted.load())
+
+    const auto deadlineAfter = [timeoutSeconds]() {
+        return std::chrono::steady_clock::now() +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(timeoutSeconds));
+    };
+
+    // The vendor library normally reconnects its transport asynchronously.
+    // Do not race it with DisconnectToGripper/ConnectToGripper here.  Wait for
+    // the existing transport to become usable; if it does not, fail safely and
+    // let the user restart the hardware pipeline.
     {
-        const auto result = SystemStart();
-        if (result != DG_RESULT_NONE) throw std::runtime_error("SystemStart failed during recovery");
-        _systemStarted.store(true);
+        const auto deadline = deadlineAfter();
+        while (!_g_connected.load())
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+                throw std::runtime_error(
+                    "DGSDK transport did not reconnect; restart hardware pipeline"
+                );
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
     }
-    const auto deadline = requestedAt + static_cast<std::int64_t>(timeoutSeconds * 1e9);
-    while (_lastTelemetryNs.load() <= requestedAt)
+
+    if (_systemStarted.exchange(false))
     {
-        if (!_g_connected.load() || _disconnectCount.load() != generation)
-            throw std::runtime_error("disconnected during recovery");
-        if (steadyNowNs() > deadline) throw std::runtime_error("telemetry stale during recovery");
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        const DG_RESULT stopResult = SystemStop();
+        if (stopResult != DG_RESULT_NONE)
+            throw std::runtime_error(
+                "SystemStop failed during recovery: " + std::to_string(stopResult)
+            );
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+
+    // Require a fresh communication/model-discovery signal for this recovery
+    // generation rather than reusing the rate cached before the fault.
+    _g_commPeriod.store(0);
+    _lastCommunicationNs.store(0);
+
+    GripperSetting gs{};
+    gs.model = DG_MODEL_DG_5F_RIGHT;
+    gs.movingInpose = 1;
+    int type[MAX_RECEIVED_DATA_TYPE_COUNT] = {1,2,3,4,5,6};
+    std::memcpy(gs.receivedDataType, type, sizeof(type));
+    const DG_RESULT optionResult = SetGripperOption(gs);
+    if (optionResult != DG_RESULT_NONE)
+        throw std::runtime_error(
+            "SetGripperOption failed during recovery: " + std::to_string(optionResult)
+        );
+
+    // Wait for the same asynchronous model-discovery gate that the known-good
+    // startup path requires before SystemStart.
+    {
+        const auto deadline = deadlineAfter();
+        while (_g_commPeriod.load() < 200)
+        {
+            if (!_g_connected.load())
+                throw std::runtime_error("DGSDK disconnected during recovery discovery");
+            if (std::chrono::steady_clock::now() >= deadline)
+                throw std::runtime_error(
+                    "DGSDK recovery model/communication discovery timeout (rate=" +
+                    std::to_string(_g_commPeriod.load()) + " Hz)"
+                );
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
+    _lastTelemetryNs.store(0);
+    _temperatureSafe.store(false);
+    _systemStartNs.store(steadyNowNs());
+    _lastMotionResult.store(DG_RESULT_NONE);
+
+    const DG_RESULT startResult = SystemStart();
+    if (startResult != DG_RESULT_NONE)
+    {
+        _systemStartNs.store(0);
+        throw std::runtime_error(
+            "SystemStart failed during recovery: " + std::to_string(startResult)
+        );
+    }
+    _systemStarted.store(true);
+
+    // Wait only for telemetry generated by this SystemStart generation.
+    {
+        const auto deadline = deadlineAfter();
+        while (!isTelemetryValid())
+        {
+            if (!_g_connected.load())
+                throw std::runtime_error("DGSDK disconnected while recovering telemetry");
+            if (std::chrono::steady_clock::now() >= deadline)
+                throw std::runtime_error("DGSDK post-recovery telemetry timeout");
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
     {
         std::lock_guard<std::mutex> dataLock(_gripperDataMutex);
         for (int i = 0; i < MAX_JOINT_COUNT; ++i)
         {
-            if (!std::isfinite(_g_gripperData.joint[i])) throw std::runtime_error("invalid measured pose");
-            if (!std::isfinite(_g_gripperData.temperature[i]) || _g_gripperData.temperature[i] >= _tempLimit)
-                throw std::runtime_error("temperature unsafe during recovery");
+            if (!std::isfinite(_g_gripperData.joint[i]))
+                throw std::runtime_error("invalid measured pose after recovery");
+            if (!std::isfinite(_g_gripperData.temperature[i]) ||
+                _g_gripperData.temperature[i] >= _tempLimit)
+                throw std::runtime_error("temperature unsafe after recovery");
             _tempPos[i] = _g_gripperData.joint[i];
+            measuredPose[i] = _g_gripperData.joint[i];
         }
     }
     _tempPos[16] = 0.0f;
-    // Synchronize only to the measured pose. No Quest target is sent here.
-    const auto result = MoveServoJoint(_tempPos);
-    _lastMotionResult.store(result);
-    if (result != DG_RESULT_NONE) throw std::runtime_error("measured-pose hold rejected during recovery");
-    {
-        std::lock_guard<std::mutex> commandLock(_commandMutex);
-        std::copy(_tempPos, _tempPos + MAX_JOINT_COUNT, _latestCommandPos);
-        std::copy(_tempPos, _tempPos + MAX_JOINT_COUNT, measuredPose);
-        _latestCommandValid.store(true);
-    }
+    measuredPose[16] = 0.0f;
+
+    // No MoveServoJoint here.  The next explicit ARM starts a software blend
+    // from this measured pose, and only then may the first servo command flow.
+    _latestCommandValid.store(false);
     _recoveryRequired.store(false);
-    if (_disconnectCount.load() != generation || !isMotionReady())
+    if (!isMotionReady())
     {
         _recoveryRequired.store(true);
-        throw std::runtime_error("hardware not ready after recovery");
+        throw std::runtime_error("hardware not ready after explicit recovery");
     }
+}
+
+void DGControl::suspendMotion()
+{
+    std::lock_guard<std::mutex> lock(_motionMutex);
+    while (_target_joint_buffer.pop(_msgTargetPos)) {}
+    _latestCommandValid.store(false);
 }
 
 bool DGControl::isTelemetryValid() const
 {
     const std::int64_t last = _lastTelemetryNs.load();
+    const std::int64_t started = _systemStartNs.load();
     constexpr std::int64_t telemetryTimeoutNs = 500'000'000LL;
-    return _g_connected.load() && last > 0 &&
+    return _g_connected.load() && _systemStarted.load() &&
+           started > 0 && last >= started &&
            steadyNowNs() - last <= telemetryTimeoutNs;
 }
 

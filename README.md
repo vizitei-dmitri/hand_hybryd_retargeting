@@ -193,13 +193,14 @@ bash scripts/stack.sh hardware 10000 hybrid 169.254.186.72
 `2 s`, hardware backend завершится и включить движение будет невозможно. В
 другом терминале проверьте состояние:
 
-Низкоуровневая обёртка не вызывает `MoveServoJoint()` до получения первой
-реальной position-команды после `arm`, кроме безопасного keepalive фактической
-стартовой позы: Developer Mode Tesollo отключает control session без servo
-traffic. Keepalive не использует target Quest и предотвращает расслабление
-кисти до `arm`; в `sdk-check` он полностью отключён. Частота, сообщаемая DGSDK,
-трактуется как Hz, а внутренний adapter loop ограничен безопасными `200 Hz`;
-входные setpoint по-прежнему формируются LeRobot с частотой `50 Hz`.
+Низкоуровневая обёртка **не вызывает `MoveServoJoint()` вообще до первой
+реальной position-команды после `arm`**. Pre-SystemStart callback старого DGSDK
+может содержать нулевую структуру, поэтому он больше не считается физической
+телеметрией. Startup ждёт model/communication discovery, выполняет `SystemStart`,
+а затем принимает только post-SystemStart telemetry и по ней инициализирует
+LeRobot. Keepalive разрешается только после первой реально принятой servo-команды
+и прекращается при `disarm`/tracking timeout. Внутренний adapter loop работает
+стабильно на `200 Hz`, а входные setpoint формируются LeRobot с частотой `50 Hz`.
 
 ```bash
 cd /home/yoba/Documents/work/hand_hybryd_retargeting
@@ -267,7 +268,8 @@ bash scripts/stack.sh hardware-headless 10000 hybrid 169.254.186.72
 | `/dg5f/lerobot/armed` | разрешена ли передача движения |
 | `/dg5f/lerobot/diagnostics` | единый snapshot состояния DGSDK (`DiagnosticArray`) |
 | `/dg5f/debug_marker` | пользовательская метка только для debug recorder |
-| `/dg5f/lerobot/enable` | сервис `std_srvs/SetBool` для arm/disarm |
+| `/dg5f/lerobot/enable` | сервис `std_srvs/SetBool` для пассивного arm/disarm |
+| `/dg5f/lerobot/recover` | явный `std_srvs/Trigger` recovery DGSDK; после него остаётся DISARMED |
 
 `/dg5f/joint_command` показывает raw-результат ретаргетинга, MuJoCo следует
 ему напрямую. `/dg5f/lerobot/commanded_joint_states` показывает сглаженный
@@ -302,15 +304,27 @@ ROS `JointState.velocity` = rpm × 2π / 60 (rad/s). `JointState.effort`
 `MOTION_RESULT_ERROR`, `RECOVERY_REQUIRED`; готовность — `READY`.
 
 При disconnect control thread остаётся жив до `stop()`, а вывод блокируется.
-После reconnect старые цели и старый keepalive не отправляются. Ручной `arm`
-выполняет preflight; если нужна recovery, существующий SDK-сеанс ждёт новый
-измеренный пакет, при необходимости вызывает `SystemStart`, очищает mailbox,
-устанавливает hold измеренной позы и сбрасывает shaper по этой позе с
-`rj_dg_5_1=0`. Затем проверяются свежие tracking/target и готовность SDK.
-При неудаче сервис возвращает `ARM FAILED: ...`, кисть остаётся DISARMED.
-При отсутствии SDK transport `arm` завершится ошибкой: автоматического
-создания нового клиента или автоматического arm после reconnect нет.
-Обычный teleop никогда не переинициализирует shaper из feedback.
+После reconnect старые цели и старый keepalive не отправляются. **`arm` теперь
+строго пассивный:** он только проверяет свежие tracking/target, transport,
+control thread, telemetry, температуру, `system_started` и `motion_ready`.
+`arm` не вызывает `SystemStart`, `SystemStop`, `MoveServoJoint`, reconnect и не
+сбрасывает command shaper. Если SDK-сеанс требует восстановления, `arm`
+завершится ошибкой и физически ничего делать не должен.
+
+Восстановление вынесено в отдельную явную команду:
+
+```bash
+bash scripts/stack.sh recover
+```
+
+`recover` всегда оставляет high-level output в `DISARMED` и сам не вызывает
+`MoveServoJoint`. Он ждёт живой transport/model-discovery, при необходимости
+перезапускает только `SystemStart`, затем принимает только новую
+post-SystemStart telemetry и возвращает измеренную pose. После успешного
+recovery shaper синхронизируется с этой pose, старые команды и low-level
+keepalive очищены, и для начала teleop требуется отдельный
+`bash scripts/stack.sh arm`. Обычный teleop никогда не переинициализирует
+shaper из feedback.
 
 ## Использование как LeRobot-плагина
 
@@ -538,11 +552,26 @@ bash scripts/stack.sh dg-status
 bash scripts/stack.sh debug-mark after_fault
 ```
 
-Для отдельной проверки восстановления дождитесь возврата транспорта,
-освободите кисть от контакта и снова выполните `bash scripts/stack.sh arm`.
-Оставьте recorder работающим на это время: он запишет `ARM_REQUESTED` и
-`RECOVERY_STARTED/SUCCEEDED/FAILED`. Если восстановление сейчас не проверяете,
-просто завершите recorder через Ctrl+C после `dg-status`.
+Для отдельной проверки восстановления дождитесь возврата транспорта и
+освободите кисть от контакта. Сначала выполните **явный recovery**:
+
+```bash
+bash scripts/stack.sh recover
+```
+
+Он может перезапустить только Tesollo servo session, поэтому выполняйте его
+только когда кисть свободна и рядом нет рук/объектов. Recovery обязан сначала
+получить свежую measured pose и после завершения всё равно оставить bridge
+`DISARMED`. Затем дождитесь нового target от Quest и только после этого:
+
+```bash
+bash scripts/stack.sh arm
+```
+
+Оставьте recorder работающим: он запишет
+`RECOVERY_STARTED/SUCCEEDED/FAILED`, а затем отдельный `ARM_REQUESTED/ARMED`.
+Если recovery сейчас не проверяете, просто завершите recorder через Ctrl+C
+после `dg-status`.
 Не запускайте `sdk-check` одновременно с physical pipeline: он создаёт SDK-клиент.
 
 CSV v2 сохраняет старые колонки и добавляет причины, ages, raw ток/скорость,
@@ -572,3 +601,16 @@ bash scripts/stack.sh stop
 
 Происхождение и лицензии зависимостей перечислены в
 [`THIRD_PARTY.md`](THIRD_PARTY.md).
+
+### Guarded direct tracking
+
+Physical Tesollo mode uses direct tracking without the old 30 deg/s acceleration ramp, but it no longer permits a one-frame 50-90 degree jump. On every ARM the software command starts from the last backend-accepted pose and blends toward the live VR target for 0.70 s. After that, direct mode limits each 50 Hz command step to 5 degrees (about 250 deg/s equivalent). These are software setpoint guards; joint limits, the fixed broken pinky joint, and Tesollo thermal protection remain active.
+
+Tune without rebuilding the image:
+
+```bash
+DG5F_STARTUP_BLEND_S=0.70 DG5F_MAX_DIRECT_STEP_DEG=5.0 \
+  bash scripts/stack.sh hardware 10000 hybrid 169.254.186.72
+```
+
+Do not set a very large direct step until the physical fault mechanism is understood.

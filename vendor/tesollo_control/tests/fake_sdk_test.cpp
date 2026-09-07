@@ -12,6 +12,8 @@ static ReceivedGripperDatasCallback received;
 static CommunicationPeriodCallback rate;
 static std::atomic<bool> packets{true};
 static std::atomic<int> moves{0};
+static std::atomic<int> systemStarts{0};
+static std::atomic<float> samplePosition{10.0f};
 static std::mutex sentMutex;
 static float sent[20];
 static ReceivedGripperData sample(float position=10.0f) {
@@ -23,10 +25,29 @@ static ReceivedGripperData sample(float position=10.0f) {
     return data;
 }
 DG_RESULT SetGripperSystem(GripperSystemSetting) { return DG_RESULT_NONE; }
-DG_RESULT SetGripperOption(GripperSetting) { return DG_RESULT_NONE; }
-DG_RESULT ConnectToGripper() { connected(); received(sample()); rate(430); return DG_RESULT_NONE; }
+DG_RESULT SetGripperOption(GripperSetting) {
+    if (rate) rate(430);
+    return DG_RESULT_NONE;
+}
+DG_RESULT ConnectToGripper() {
+    connected();
+    // Model/transport discovery happens before SystemStart in the real SDK.
+    rate(430);
+    // A pre-SystemStart zero packet must never be treated as physical data.
+    if (packets.load()) received(ReceivedGripperData{});
+    return DG_RESULT_NONE;
+}
 DG_RESULT DisconnectToGripper() { disconnected(); return DG_RESULT_NONE; }
-DG_RESULT SystemStart() { return DG_RESULT_NONE; }
+DG_RESULT SystemStart() {
+    ++systemStarts;
+    if (packets.load()) {
+        std::thread([] {
+            std::this_thread::sleep_for(2ms);
+            if (packets.load()) received(sample(samplePosition.load()));
+        }).detach();
+    }
+    return DG_RESULT_NONE;
+}
 DG_RESULT SystemStop() { return DG_RESULT_NONE; }
 DG_RESULT SetJointGainPAll(float*) { return DG_RESULT_NONE; }
 DG_RESULT SetJointGainDAll(float*) { return DG_RESULT_NONE; }
@@ -47,7 +68,11 @@ DG_RESULT CallbackForOnDataProcessing(DataProcessingCallback) { return DG_RESULT
 int main() {
     auto* control=DGControl::getInstance("127.0.0.1",502,1);
     control->start();
+    // Startup is motion-free: pre-SystemStart zero telemetry is ignored and
+    // no MoveServoJoint is emitted while the bridge is DISARMED.
+    assert(moves.load() == 0);
     std::this_thread::sleep_for(30ms);
+    assert(moves.load() == 0);
     float p[20], c[20], v[20], t[20];
     assert(control->getTelemetry(p,c,v,t));
     assert(c[0]==311.0f && v[0]==-12.0f && t[0]==42.5f && p[0]==10.0f);
@@ -56,6 +81,8 @@ int main() {
     assert(control->isTemperatureSafe());
     float oldTarget[20]; std::fill(oldTarget,oldTarget+20,30.0f);
     assert(control->setTragetPosition(oldTarget));
+    std::this_thread::sleep_for(30ms);
+    assert(moves.load() >= 1);
     disconnected(); disconnected(); // duplicate callback must not increment again
     std::this_thread::sleep_for(30ms);
     assert(control->getDisconnectCount()==1);
@@ -64,28 +91,30 @@ int main() {
     assert(control->motionReadyReason()=="DISCONNECTED");
     assert(control->isTemperatureSafe());
     auto before=moves.load();
-    connected(); received(sample(15.0f));
+    samplePosition.store(15.0f);
+    connected(); rate(430);
     std::this_thread::sleep_for(30ms);
-    assert(moves==before); // neither stale target nor stale keepalive can replay
+    assert(moves==before); // reconnect alone cannot replay stale output
     assert(!control->setTragetPosition(oldTarget));
     assert(control->getReconnectCount()==1);
-    std::jthread producer([] { while(packets) { received(sample(15.0f)); std::this_thread::sleep_for(5ms); } });
     control->recover(p,0.5);
     assert(p[0]==15.0f && p[16]==0.0f && control->isMotionReady());
-    {
-        std::lock_guard<std::mutex> lock(sentMutex);
-        assert(sent[0]==15.0f && sent[16]==0.0f);
-    }
-    packets=false; producer.join();
+    assert(moves==before); // recovery itself is motion-free
+    packets=false;
     std::this_thread::sleep_for(550ms);
     assert(!control->isTelemetryValid() && control->isTemperatureSafe());
     assert(control->motionReadyReason()=="TELEMETRY_STALE");
+
+    // Simulate a reconnect whose restarted system never produces telemetry.
+    // Recovery may call SystemStart, but must never emit a servo command.
+    disconnected();
+    connected(); rate(430);
     before=moves;
+    const auto startsBeforeFailedRecovery = systemStarts.load();
     bool failed=false;
     try { control->recover(p,0.05); } catch(const std::runtime_error&) { failed=true; }
     assert(failed && moves==before);
-    received(sample()); std::this_thread::sleep_for(25ms);
-    assert(moves==before); // fresh telemetry alone cannot clear recovery latch
+    assert(systemStarts.load()==startsBeforeFailedRecovery + 1);
     auto hot=sample(); hot.temperature[2]=65.0f; received(hot);
     assert(!control->isTemperatureSafe());
     control->stop();

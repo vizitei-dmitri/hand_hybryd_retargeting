@@ -13,7 +13,7 @@ from rclpy.task import Future
 from rclpy.callback_groups import ReentrantCallbackGroup
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32MultiArray, String
-from std_srvs.srv import SetBool
+from std_srvs.srv import SetBool, Trigger
 from trajectory_msgs.msg import JointTrajectory
 
 from .config_dg5f import Dg5fConfig
@@ -69,6 +69,7 @@ class Dg5fLeRobotBridge(Node):
             "diagnostics_topic", "/dg5f/lerobot/diagnostics"
         )
         self.declare_parameter("enable_service", "/dg5f/lerobot/enable")
+        self.declare_parameter("recover_service", "/dg5f/lerobot/recover")
         self.declare_parameter("backend", "mock")
         self.declare_parameter("ip", "169.254.186.72")
         self.declare_parameter("port", 502)
@@ -84,6 +85,8 @@ class Dg5fLeRobotBridge(Node):
         self.declare_parameter("filter_tau_s", 0.05)
         self.declare_parameter("target_deadband_deg", 0.20)
         self.declare_parameter("min_send_step_deg", 0.20)
+        self.declare_parameter("max_direct_step_deg", 5.0)
+        self.declare_parameter("startup_blend_s", 0.70)
         self.declare_parameter("max_dt_s", 0.05)
         self.declare_parameter("initial_feedback_timeout_s", 2.0)
         self.declare_parameter("telemetry_drain_limit", 16)
@@ -135,6 +138,12 @@ class Dg5fLeRobotBridge(Node):
             min_send_step_deg=float(
                 self.get_parameter("min_send_step_deg").value
             ),
+            max_direct_step_deg=float(
+                self.get_parameter("max_direct_step_deg").value
+            ),
+            startup_blend_s=float(
+                self.get_parameter("startup_blend_s").value
+            ),
             max_dt_s=float(self.get_parameter("max_dt_s").value),
             initial_feedback_timeout_s=float(
                 self.get_parameter("initial_feedback_timeout_s").value
@@ -159,6 +168,7 @@ class Dg5fLeRobotBridge(Node):
         self._last_tracking_time: Optional[float] = None
         self._disarm_reason = "NONE"
         self._recovery_state = "IDLE"
+        self._recovery_pending = False
         self._arm_pending = False
         self._arm_epoch = 0
         self._workers = ThreadPoolExecutor(max_workers=1)
@@ -199,11 +209,18 @@ class Dg5fLeRobotBridge(Node):
             self._on_tracking,
             1,
         )
+        self._service_group = ReentrantCallbackGroup()
         self._enable_service = self.create_service(
             SetBool,
             str(self.get_parameter("enable_service").value),
             self._on_enable,
-            callback_group=ReentrantCallbackGroup(),
+            callback_group=self._service_group,
+        )
+        self._recover_service = self.create_service(
+            Trigger,
+            str(self.get_parameter("recover_service").value),
+            self._on_recover,
+            callback_group=self._service_group,
         )
 
         command_hz = float(self.get_parameter("command_rate_hz").value)
@@ -268,68 +285,131 @@ class Dg5fLeRobotBridge(Node):
         return None
 
     async def _on_enable(self, request: SetBool.Request, response: SetBool.Response):
+        """Enable/disable output. ARM is a strictly passive preflight.
+
+        In particular ARM must never call DGSDK recovery, SystemStart,
+        SystemStop or MoveServoJoint. Faulted sessions are handled only by the
+        explicit ``/dg5f/lerobot/recover`` service.
+        """
         if not request.data:
-            self._arm_epoch += 1  # Cancel any recovery/preflight in progress.
+            self._arm_epoch += 1
             self._disarm("USER_REQUEST")
             response.success, response.message = True, "DG5F output disabled"
             return response
+
         self._event("ARM_REQUESTED")
+        if self._recovery_pending:
+            response.success, response.message = False, "ARM FAILED: explicit recovery is running"
+            self.get_logger().warning(response.message)
+            return response
         if self._arm_pending:
-            response.success, response.message = False, "ARM FAILED: recovery already running"
+            response.success, response.message = False, "ARM FAILED: preflight already running"
+            self.get_logger().warning(response.message)
             return response
         if self._armed:
             response.success, response.message = True, "DG5F output already enabled"
             return response
-        epoch = self._arm_epoch
-        recovering = False
+
+        self._arm_pending = True
         try:
             failure = self._input_failure()
             if failure:
                 raise RuntimeError(failure)
+            if self._latest_command_deg is None:
+                raise RuntimeError("COMMAND_TIMEOUT")
+
+            # PASSIVE ONLY: prepare_arm reads status and validates it. It may
+            # not reconnect/restart/reseed/send any hardware command.
+            self._robot.prepare_arm()
+
+            failure = self._input_failure()
+            if failure:
+                raise RuntimeError(failure)
             status = self._robot.get_diagnostics()
-            recovering = bool(status.get("recovery_required")) or not status.get("motion_ready")
-            self._arm_pending = True
-            if recovering:
-                self._recovery_state = "STARTED"
-                self._event("RECOVERY_STARTED")
-                self._latest_command_deg = None
-                self._last_command_time = None
-            # ROS timers/subscriptions keep running during a bounded SDK wait.
+            failure = disarm_reason(status)
+            if failure != "NONE":
+                raise RuntimeError(failure)
+
+            # Software-only safety transition: begin from the last accepted
+            # physical setpoint and blend toward the current VR target.  This
+            # does not call DGSDK or send any command while ARM is still false.
+            self._robot.begin_arm_blend()
+            self._disarm_reason = "NONE"
+            self._armed = True
+            self._event("ARMED")
+            response.success, response.message = True, "DG5F output enabled (passive preflight OK)"
+        except Exception as error:
+            self._armed = False
+            self._disarm_reason = str(error)
+            response.success, response.message = False, f"ARM FAILED: {error}"
+        finally:
+            self._arm_pending = False
+        self.get_logger().warning(response.message)
+        return response
+
+    async def _on_recover(self, request: Trigger.Request, response: Trigger.Response):
+        """Explicitly recover only the Tesollo control session.
+
+        Recovery may restart the DGSDK system, but it never sends MoveServoJoint.
+        It is separated from ARM and always leaves the bridge DISARMED.
+        """
+        del request
+        if self._backend_name != "tesollo":
+            response.success, response.message = False, "RECOVERY FAILED: real Tesollo backend is not active"
+            return response
+        if self._recovery_pending:
+            response.success, response.message = False, "RECOVERY FAILED: recovery already running"
+            return response
+
+        self._arm_epoch += 1
+        self._disarm("RECOVERY_REQUESTED")
+        self._armed = False
+        self._arm_pending = False
+        self._recovery_pending = True
+        self._recovery_state = "STARTED"
+        self._event("RECOVERY_STARTED")
+
+        # Never let a pre-fault command execute after recovery. A new live
+        # target must arrive before the user can ARM again.
+        self._latest_command_deg = None
+        self._last_command_time = None
+        self._robot.hold_position()
+
+        try:
             pending = Future(executor=self.executor)
-            worker = self._workers.submit(self._robot.prepare_arm)
+            worker = self._workers.submit(self._robot.recover)
 
             def complete(job):
                 try:
                     pending.set_result(job.result())
                 except Exception as error:
                     pending.set_exception(error)
+
             worker.add_done_callback(complete)
             await pending
-            if epoch != self._arm_epoch:
-                raise RuntimeError("USER_REQUEST: arm cancelled")
-            failure = self._input_failure()
-            if failure or self._latest_command_deg is None:
-                raise RuntimeError(failure or "COMMAND_TIMEOUT")
+
             status = self._robot.get_diagnostics()
-            failure = disarm_reason(status)
-            if failure != "NONE":
-                raise RuntimeError(failure)
-            if recovering:
-                self._recovery_state = "SUCCEEDED"
-                self._event("RECOVERY_SUCCEEDED")
-            self._disarm_reason = "NONE"
-            self._armed = True
-            self._event("ARMED")
-            response.success, response.message = True, "DG5F output enabled (preflight OK)"
+            if not status.get("motion_ready", False):
+                raise RuntimeError(str(status.get("motion_ready_reason", "SDK_NOT_MOTION_READY")))
+
+            self._recovery_state = "SUCCEEDED"
+            self._disarm_reason = "RECOVERY_REQUIRED_ARM"
+            self._event("RECOVERY_SUCCEEDED")
+            response.success = True
+            response.message = (
+                "DG5F recovery succeeded; output remains DISARMED. "
+                "Wait for a fresh Quest command, then run arm."
+            )
         except Exception as error:
-            self._armed = False
-            self._disarm_reason = "RECOVERY_FAILED" if recovering else str(error)
-            if recovering:
-                self._recovery_state = "FAILED"
-                self._event("RECOVERY_FAILED", reason=str(error))
-            response.success, response.message = False, f"ARM FAILED: {error}"
+            self._recovery_state = "FAILED"
+            self._disarm_reason = "RECOVERY_FAILED"
+            self._event("RECOVERY_FAILED", reason=str(error))
+            response.success = False
+            response.message = f"RECOVERY FAILED: {error}"
         finally:
-            self._arm_pending = False
+            self._recovery_pending = False
+            self._armed = False
+
         self.get_logger().warning(response.message)
         return response
 
@@ -474,13 +554,16 @@ class Dg5fLeRobotBridge(Node):
         snapshot["tracking_ok"] = self._tracking_ok
         snapshot["disarm_reason"] = self._disarm_reason
         snapshot["recovery_state"] = self._recovery_state
+        snapshot["recovery_pending"] = self._recovery_pending
         snapshot["last_command_age_ms"] = age_ms(self._last_command_time, self._now_seconds())
         snapshot["last_tracking_age_ms"] = age_ms(self._last_tracking_time, self._now_seconds())
         snapshot["backend"] = self._backend_name
         snapshot["control_smoothing"] = self.get_parameter("control_smoothing").value
-        snapshot["command_profile"] = "smoothed" if snapshot["control_smoothing"] else "direct"
+        snapshot["command_profile"] = "smoothed" if snapshot["control_smoothing"] else "direct_guarded"
+        snapshot["arm_blend_active"] = self._robot.command_shaper.arm_blend_active
         for name in ("max_speed_deg_s", "max_accel_deg_s2", "response_time_s",
-                     "filter_tau_s", "target_deadband_deg", "min_send_step_deg"):
+                     "filter_tau_s", "target_deadband_deg", "min_send_step_deg",
+                     "max_direct_step_deg", "startup_blend_s"):
             snapshot[name] = self.get_parameter(name).value
 
         measured_pos = np.asarray(

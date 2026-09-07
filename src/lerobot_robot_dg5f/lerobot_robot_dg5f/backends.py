@@ -26,6 +26,9 @@ class Dg5fBackend(Protocol):
     def send_positions(self, positions_deg: np.ndarray) -> None:
         pass
 
+    def suspend_motion(self) -> None:
+        pass
+
     def read_initial_position(
         self, timeout_s: float, drain_limit: int
     ) -> np.ndarray:
@@ -64,6 +67,10 @@ class MockDg5fBackend:
         if command.shape != (len(JOINT_NAMES),) or not np.all(np.isfinite(command)):
             raise ValueError("Expected 20 finite DG5F positions")
         self._positions = command.copy()
+
+    def suspend_motion(self) -> None:
+        # Mock backend has no persistent low-level keepalive.
+        return
 
     def read_initial_position(
         self, timeout_s: float, drain_limit: int
@@ -171,6 +178,14 @@ class TesolloDg5fBackend:
                 self._api.stop()
             finally:
                 self._connected = False
+
+    def suspend_motion(self) -> None:
+        """Clear pending low-level motion/keepalive without sending a new target."""
+        if not self._connected or self._api is None:
+            return
+        suspend = getattr(self._api, "suspend_motion", None)
+        if suspend is not None:
+            suspend()
 
     def send_positions(self, positions_deg: np.ndarray) -> None:
         if not self._connected or self._api is None:

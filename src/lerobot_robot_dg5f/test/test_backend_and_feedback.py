@@ -23,6 +23,14 @@ class EndlessFeedbackApi:
         return True, np.full(20, self.calls, dtype=np.float32)
 
 
+class SuspendApi:
+    def __init__(self):
+        self.calls = 0
+
+    def suspend_motion(self):
+        self.calls += 1
+
+
 class CommandQueueApi:
     def __init__(self, results, temperature=None, control_status=None):
         self.results = iter(results)
@@ -94,6 +102,17 @@ class RejectingCommandBackend(StaleFeedbackBackend):
     def send_positions(self, positions_deg):
         del positions_deg
         raise RuntimeError("queue rejected")
+
+
+def test_tesollo_backend_suspend_motion_forwards_to_sdk():
+    api = SuspendApi()
+    backend = TesolloDg5fBackend("127.0.0.1", 502, 1)
+    backend._api = api
+    backend._connected = True
+
+    backend.suspend_motion()
+
+    assert api.calls == 1
 
 
 def test_latest_feedback_read_is_bounded():

@@ -41,6 +41,8 @@ class PositionCommandShaper:
         filter_tau_s: float = 0.05,
         target_deadband_deg: float = 0.20,
         min_send_step_deg: float = 0.20,
+        max_direct_step_deg: float = 5.0,
+        startup_blend_s: float = 0.70,
         max_dt_s: float = 0.05,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -80,6 +82,8 @@ class PositionCommandShaper:
             "filter_tau_s": filter_tau_s,
             "target_deadband_deg": target_deadband_deg,
             "min_send_step_deg": min_send_step_deg,
+            "max_direct_step_deg": max_direct_step_deg,
+            "startup_blend_s": startup_blend_s,
         }
         for name, value in non_negative.items():
             if not np.isfinite(value) or value < 0.0:
@@ -92,6 +96,8 @@ class PositionCommandShaper:
         self.filter_tau_s = float(filter_tau_s)
         self.target_deadband_deg = float(target_deadband_deg)
         self.min_send_step_deg = float(min_send_step_deg)
+        self.max_direct_step_deg = float(max_direct_step_deg)
+        self.startup_blend_s = float(startup_blend_s)
         self.max_dt_s = float(max_dt_s)
         self._clock = clock
 
@@ -100,6 +106,9 @@ class PositionCommandShaper:
         self.last_sent_pose_deg: np.ndarray | None = None
         self.filtered_target_deg: np.ndarray | None = None
         self.last_update_time: float | None = None
+        self._blend_origin_deg: np.ndarray | None = None
+        self._blend_start_time: float | None = None
+        self._blend_duration_s: float = 0.0
 
     @property
     def is_initialized(self) -> bool:
@@ -133,6 +142,37 @@ class PositionCommandShaper:
         self.last_sent_pose_deg = initial.copy()
         self.filtered_target_deg = initial.copy()
         self.last_update_time = timestamp
+        self._cancel_blend()
+
+    def begin_arm_blend(self, now: float | None = None) -> None:
+        """Start a software-only blend from the current accepted pose.
+
+        This method never sends a hardware command.  It is intended to be
+        called immediately before the high-level bridge transitions to ARMED.
+        The first live VR target is then approached over ``startup_blend_s``
+        instead of being emitted as one large direct-mode step.
+        """
+        if not self.is_initialized:
+            raise RuntimeError("PositionCommandShaper must be reset before arm blend")
+        assert self.command_pose_deg is not None
+        timestamp = self._clock() if now is None else float(now)
+        if not np.isfinite(timestamp):
+            raise ValueError("Blend timestamp must be finite")
+        if self.startup_blend_s <= 0.0:
+            self._cancel_blend()
+            return
+        self._blend_origin_deg = self.command_pose_deg.copy()
+        self._blend_start_time = timestamp
+        self._blend_duration_s = self.startup_blend_s
+
+    def _cancel_blend(self) -> None:
+        self._blend_origin_deg = None
+        self._blend_start_time = None
+        self._blend_duration_s = 0.0
+
+    @property
+    def arm_blend_active(self) -> bool:
+        return self._blend_origin_deg is not None and self._blend_start_time is not None
 
     def step(self, target_deg: np.ndarray, now: float | None = None) -> CommandStep:
         """Advance the internal trajectory and propose the next SDK setpoint."""
@@ -155,10 +195,22 @@ class PositionCommandShaper:
         dt = float(np.clip(elapsed, 1e-3, self.max_dt_s))
         self.last_update_time = timestamp
 
+        shaped_target = target
+        if self.arm_blend_active:
+            assert self._blend_origin_deg is not None
+            assert self._blend_start_time is not None
+            blend_elapsed = max(0.0, timestamp - self._blend_start_time)
+            alpha = min(1.0, blend_elapsed / self._blend_duration_s)
+            shaped_target = self._blend_origin_deg + alpha * (target - self._blend_origin_deg)
+            shaped_target = np.clip(shaped_target, self.lower_limits_deg, self.upper_limits_deg)
+            shaped_target = self._apply_disabled(shaped_target)
+            if alpha >= 1.0:
+                self._cancel_blend()
+
         if self.smoothing:
             alpha = 1.0 if self.filter_tau_s == 0.0 else dt / (self.filter_tau_s + dt)
             self.filtered_target_deg += alpha * (
-                target - self.filtered_target_deg
+                shaped_target - self.filtered_target_deg
             )
             self.filtered_target_deg = self._apply_disabled(self.filtered_target_deg)
 
@@ -187,8 +239,18 @@ class PositionCommandShaper:
                 new_command, self.lower_limits_deg, self.upper_limits_deg
             )
         else:
-            self.filtered_target_deg = target.copy()
-            self.command_pose_deg = target.copy()
+            self.filtered_target_deg = shaped_target.copy()
+            delta = shaped_target - self.command_pose_deg
+            if self.max_direct_step_deg > 0.0:
+                delta = np.clip(
+                    delta,
+                    -self.max_direct_step_deg,
+                    self.max_direct_step_deg,
+                )
+            self.command_pose_deg = self.command_pose_deg + delta
+            self.command_pose_deg = np.clip(
+                self.command_pose_deg, self.lower_limits_deg, self.upper_limits_deg
+            )
             self.velocity_deg_s.fill(0.0)
 
         self.command_pose_deg = self._apply_disabled(self.command_pose_deg)
@@ -229,6 +291,7 @@ class PositionCommandShaper:
         self.filtered_target_deg = held.copy()
         self.velocity_deg_s.fill(0.0)
         self.last_update_time = timestamp
+        self._cancel_blend()
 
     def effective_command(self) -> np.ndarray:
         """Return the last position setpoint accepted by the backend."""

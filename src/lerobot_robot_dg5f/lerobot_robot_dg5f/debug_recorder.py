@@ -341,7 +341,8 @@ class Dg5fDebugRecorder(Node):
         self._last_diagnostics_at = time.monotonic()
         self._diagnostics.update(_parse_diagnostics(message))
         for key in ("control_smoothing", "command_profile", "max_speed_deg_s", "max_accel_deg_s2", "response_time_s",
-                    "filter_tau_s", "target_deadband_deg", "min_send_step_deg"):
+                    "filter_tau_s", "target_deadband_deg", "min_send_step_deg",
+                    "max_direct_step_deg", "startup_blend_s"):
             if key in self._diagnostics:
                 self.writer.manifest.setdefault("runtime_configuration", {})[key] = self._diagnostics[key]
         if "backend" in self._diagnostics:
