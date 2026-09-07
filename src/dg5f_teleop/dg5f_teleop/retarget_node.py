@@ -109,7 +109,10 @@ class RetargetNode(Node):
         self.declare_parameter("urdf_path", "")
         self.declare_parameter("retargeting_config", "")
         self.declare_parameter("scaling_factor", 1.0)
-        self.declare_parameter("max_joint_velocity", 3.0)
+        self.declare_parameter("max_joint_velocity", 0.0)
+        velocity_limit = float(self.get_parameter("max_joint_velocity").value)
+        if not np.isfinite(velocity_limit) or velocity_limit < 0:
+            raise ValueError("max_joint_velocity must be >= 0 (0 disables the software cap)")
         self.declare_parameter("watchdog_timeout", 0.35)
         self.declare_parameter("input_reliability", "reliable")
         self.declare_parameter("prevent_distal_hyperextension", False)
@@ -417,12 +420,13 @@ class RetargetNode(Node):
         if self._last_output is not None and self._last_command_time is not None:
             dt = np.clip(now - self._last_command_time, 1e-3, 0.1)
             max_velocity = float(self.get_parameter("max_joint_velocity").value)
-            max_delta = max_velocity * dt
-            target = np.clip(
-                target,
-                self._last_output - max_delta,
-                self._last_output + max_delta,
-            )
+            if max_velocity > 0.0:
+                max_delta = max_velocity * dt
+                target = np.clip(
+                    target,
+                    self._last_output - max_delta,
+                    self._last_output + max_delta,
+                )
 
         # Apply after every optimizer/filter stage. The digital twin, LeRobot
         # dataset action and physical hand therefore all receive the same fault.

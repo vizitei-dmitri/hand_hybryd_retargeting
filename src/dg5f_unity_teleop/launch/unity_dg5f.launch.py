@@ -32,7 +32,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "lerobot_max_relative_target_deg", default_value="7.0"
             ),
-            DeclareLaunchArgument("max_joint_velocity", default_value="3.0"),
+            DeclareLaunchArgument("max_joint_velocity", default_value="0.0"),
+            DeclareLaunchArgument("lerobot_control_smoothing", default_value="false"),
             DeclareLaunchArgument("mujoco_actuator_kp", default_value="40.0"),
             DeclareLaunchArgument("mujoco_actuator_kd", default_value="0.5"),
             DeclareLaunchArgument(
@@ -144,6 +145,9 @@ def generate_launch_description() -> LaunchDescription:
                         "backend": ParameterValue(
                             LaunchConfiguration("lerobot_backend"),
                             value_type=str,
+                        ),
+                        "control_smoothing": ParameterValue(
+                            LaunchConfiguration("lerobot_control_smoothing"), value_type=bool,
                         ),
                         "auto_enable": ParameterValue(
                             LaunchConfiguration("lerobot_auto_enable"),

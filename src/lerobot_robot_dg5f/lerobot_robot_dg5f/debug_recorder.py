@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import time
 import platform
 import shutil
 import signal
@@ -34,6 +36,7 @@ TOPICS = {
     "tracking": "/dg5f/tracking_ok",
     "diagnostics": "/dg5f/lerobot/diagnostics",
     "marker": "/dg5f/debug_marker",
+    "events": "/dg5f/lerobot/events",
 }
 
 
@@ -59,6 +62,7 @@ def collect_manifest(args: argparse.Namespace) -> dict[str, object]:
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         parameters = config["dg5f_lerobot_bridge"]["ros__parameters"]
         wanted = (
+            "control_smoothing",
             "max_speed_deg_s",
             "max_accel_deg_s2",
             "response_time_s",
@@ -114,7 +118,9 @@ class NetworkCounters:
         values: dict[str, int] = {}
         for key in NETWORK_FIELDS:
             try:
-                values[key] = int((self.path / key).read_text().strip())
+                path = self.path.parent / key if key in {"carrier", "operstate", "carrier_changes"} else self.path / key
+                raw = path.read_text().strip()
+                values[key] = raw if key == "operstate" else int(raw)
             except (OSError, ValueError):
                 continue
         return values
@@ -164,6 +170,8 @@ def _parse_diagnostics(message: DiagnosticArray) -> dict[str, object]:
                 "measured_vel",
                 "measured_current",
                 "measured_temp",
+                "raw_velocity",
+                "raw_current",
             }:
                 try:
                     array = [float(value) for value in item.value.split(",")]
@@ -183,7 +191,7 @@ class PassiveProcesses:
         self._processes: list[tuple[subprocess.Popen, object]] = []
         if args.ping:
             self._start(
-                ["ping", args.hand_ip], run_dir / "ping.log", "ping"
+                ["ping", "-D", "-i", "0.1", args.hand_ip], run_dir / "ping.log", "ping"
             )
         if args.tcpdump:
             expression = ["host", args.hand_ip, "and", "tcp", "port", str(args.hand_port)]
@@ -231,7 +239,11 @@ class PassiveProcesses:
 class Dg5fDebugRecorder(Node):
     def __init__(self, args: argparse.Namespace) -> None:
         super().__init__("dg5f_debug_recorder")
-        self.writer = DebugRunWriter(args.output_root, collect_manifest(args))
+        self.writer = DebugRunWriter(args.output_root, collect_manifest(args),
+                                     run_stamp=args.run_stamp, defer_archive=args.defer_archive,
+                                     arm_events_from_bridge=True)
+        self._stop_file = Path(args.stop_file) if args.stop_file else None
+        self._last_diagnostics_at = None
         self.writer.write_static_file(
             "README.txt",
             "Passive DG5F recording. No hardware commands are sent.\n"
@@ -248,6 +260,9 @@ class Dg5fDebugRecorder(Node):
         self.writer.write_static_file(
             "system.txt", collect_system_text(args.interface)
         )
+        # Host orchestration owns network processes and closes them before archive.
+        if args.external_network:
+            args.ping = args.tcpdump = False
         self._passive_processes = PassiveProcesses(self.writer.run_dir, args)
         self._network_reader = NetworkCounters(args.interface)
         self._network: dict[str, int] = {}
@@ -289,6 +304,7 @@ class Dg5fDebugRecorder(Node):
             DiagnosticArray, TOPICS["diagnostics"], self._on_diagnostics, 10
         )
         self.create_subscription(String, TOPICS["marker"], self._on_marker, 10)
+        self.create_subscription(String, TOPICS["events"], self._on_event, 100)
         self.create_timer(1.0 / self._rate, self._sample)
 
     def _set_bool(self, key: str, message: Bool) -> None:
@@ -322,7 +338,14 @@ class Dg5fDebugRecorder(Node):
             self._state["temperature"] = [float(value) for value in message.data]
 
     def _on_diagnostics(self, message: DiagnosticArray) -> None:
+        self._last_diagnostics_at = time.monotonic()
         self._diagnostics.update(_parse_diagnostics(message))
+        for key in ("control_smoothing", "command_profile", "max_speed_deg_s", "max_accel_deg_s2", "response_time_s",
+                    "filter_tau_s", "target_deadband_deg", "min_send_step_deg"):
+            if key in self._diagnostics:
+                self.writer.manifest.setdefault("runtime_configuration", {})[key] = self._diagnostics[key]
+        if "backend" in self._diagnostics:
+            self.writer.manifest["backend"] = self._diagnostics["backend"]
         low_level_deg = self._diagnostics.get("latest_command_deg")
         command_valid = bool(self._diagnostics.get("latest_command_valid", False))
         if (
@@ -333,11 +356,32 @@ class Dg5fDebugRecorder(Node):
             self._state["low_level_command"] = np.deg2rad(low_level_deg).tolist()
         elif not command_valid:
             self._state["low_level_command"] = None
+        for raw, normal, scale in (("measured_pos", "measured", np.pi / 180),
+                                   ("measured_vel", "velocity", np.pi / 180),
+                                   ("measured_current", "current", 1),
+                                   ("measured_temp", "temperature", 1)):
+            values = self._diagnostics.get(raw)
+            if isinstance(values, list) and len(values) == 20:
+                self._state[normal] = (np.asarray(values) * scale).tolist()
+
+    def _on_event(self, message):
+        try:
+            event = json.loads(message.data)
+        except (ValueError, TypeError):
+            return
+        # Arm/recovery transitions can occur between timeline samples.
+        if event.get("event") in {"ARM_REQUESTED", "ARMED", "DISARMED", "RECOVERY_STARTED", "RECOVERY_SUCCEEDED", "RECOVERY_FAILED"}:
+            name = event.pop("event")
+            source_time = event.get("source_monotonic_s")
+            relative = None if source_time is None else source_time - self.writer.manifest["start_monotonic_s"]
+            self.writer.add_event(name, t=relative, **event)
 
     def _on_marker(self, message: String) -> None:
         self.writer.add_marker(message.data)
 
     def _sample(self) -> None:
+        if self._stop_file is not None and self._stop_file.exists():
+            raise KeyboardInterrupt
         elapsed = self.writer.elapsed()
         if elapsed - self._last_network_sample >= 1.0:
             self._network = self._network_reader.read()
@@ -345,10 +389,14 @@ class Dg5fDebugRecorder(Node):
             self._last_network_sample = elapsed
         snapshot = dict(self._state)
         snapshot.update(self._diagnostics)
-        # Dedicated Bool topics are authoritative for these three values.
+        # Prefer one coherent diagnostics snapshot so reason and state agree.
         for key in ("tracking_ok", "armed", "transport_connected"):
-            if self._state[key] is not None:
+            if key not in self._diagnostics and self._state[key] is not None:
                 snapshot[key] = self._state[key]
+        snapshot["diagnostics_age_ms"] = (
+            (time.monotonic() - self._last_diagnostics_at) * 1000
+            if self._last_diagnostics_at is not None else float("nan")
+        )
         snapshot["network"] = self._network
         row = self.writer.record(snapshot)
         if elapsed - self._last_status_print >= 1.0:
@@ -379,6 +427,10 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
     parser.add_argument("--backend", default="tesollo")
     parser.add_argument("--ping", action="store_true")
     parser.add_argument("--tcpdump", action="store_true")
+    parser.add_argument("--run-stamp")
+    parser.add_argument("--stop-file")
+    parser.add_argument("--defer-archive", action="store_true")
+    parser.add_argument("--external-network", action="store_true")
     args, ros_args = parser.parse_known_args(argv)
     if not 1.0 <= args.rate <= 200.0:
         parser.error("--rate must be between 1 and 200 Hz")
@@ -409,7 +461,8 @@ def main(args: Sequence[str] | None = None) -> None:
         if node is not None:
             archive = node.finalize()
             print(f"Recording finalized: {node.writer.run_dir}", flush=True)
-            print(f"Archive: {archive}", flush=True)
+            if not options.defer_archive:
+                print(f"Archive: {archive}", flush=True)
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

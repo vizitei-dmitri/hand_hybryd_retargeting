@@ -114,6 +114,12 @@ class SmokeValidator(Node):
                 "max_tracking_error_deg",
             }
             if required <= values.keys():
+                if values.get("current_unit") != "mA" or values.get("raw_velocity_unit") != "rpm":
+                    self.errors.append("Unexpected telemetry units in diagnostics")
+                    return
+                if values.get("command_profile") != "direct":
+                    self.errors.append("Default launch did not enable direct command profile")
+                    return
                 self.received.add("diagnostics")
 
 

@@ -275,6 +275,43 @@ setpoint, реально принятый physical/mock backend. `/dg5f/lerobot/
 содержит измеренную позицию и скорость. Поле `JointState.effort` содержит
 telemetry тока мотора, а не рассчитанный torque.
 
+Схема телеметрии v2 (исправлена 07.09.2026): SDK `joint: float[20]` — градусы,
+`current: int[20]` — **мА**, `velocity: int[20]` — **rpm**,
+`temperature: float[20]` — °C. Это единицы из `DGDataTypes.h`.
+Раньше `memcpy(int[], float[])` искажал ток и скорость: значения порядка
+`4e-43` в старых архивах нельзя использовать как физические измерения.
+Теперь преобразование поэлементное; LeRobot `.vel` = rpm × 6 (deg/s),
+ROS `JointState.velocity` = rpm × 2π / 60 (rad/s). `JointState.effort`
+содержит мА, **не Н·м**. В CSV `raw_current_*` — мА, `raw_velocity_*` — rpm,
+`current_*` — мА, `velocity_*` — rad/s, положения и `error_*` — rad.
+
+В diagnostics доступны причины `disarm_reason` и `motion_ready_reason`,
+а также возраст команды, tracking, телеметрии и communication callback в мс.
+`last_sdk_packet_age_ms` — возраст `ReceivedGripperData` callback: SDK
+не предоставляет время каждого TCP-пакета, поэтому это явно помеченный proxy.
+Настоящие времена сетевых пакетов сохраняются в pcap. `temperature_safe`
+описывает только известную измеренную температуру <65 °C; потеря связи
+не превращает последнюю температуру 42.5 °C в перегрев.
+
+Причины disarm: `USER_REQUEST`, `COMMAND_TIMEOUT`, `TRACKING_TIMEOUT`,
+`SDK_COMMAND_REJECTED`, `SDK_DISCONNECTED`, `SDK_NOT_MOTION_READY`,
+`TELEMETRY_STALE`, `TEMPERATURE_LIMIT`, `SYSTEM_NOT_STARTED`,
+`RECOVERY_FAILED`, `INTERNAL_ERROR`; нормальное состояние — `NONE`.
+Причины неготовности SDK: `DISCONNECTED`, `CONTROL_THREAD_STOPPED`,
+`TELEMETRY_STALE`, `TEMPERATURE_UNSAFE`, `SYSTEM_NOT_STARTED`,
+`MOTION_RESULT_ERROR`, `RECOVERY_REQUIRED`; готовность — `READY`.
+
+При disconnect control thread остаётся жив до `stop()`, а вывод блокируется.
+После reconnect старые цели и старый keepalive не отправляются. Ручной `arm`
+выполняет preflight; если нужна recovery, существующий SDK-сеанс ждёт новый
+измеренный пакет, при необходимости вызывает `SystemStart`, очищает mailbox,
+устанавливает hold измеренной позы и сбрасывает shaper по этой позе с
+`rj_dg_5_1=0`. Затем проверяются свежие tracking/target и готовность SDK.
+При неудаче сервис возвращает `ARM FAILED: ...`, кисть остаётся DISARMED.
+При отсутствии SDK transport `arm` завершится ошибкой: автоматического
+создания нового клиента или автоматического arm после reconnect нет.
+Обычный teleop никогда не переинициализирует shaper из feedback.
+
 ## Использование как LeRobot-плагина
 
 Имя пакета следует соглашению сторонних плагинов LeRobot —
@@ -332,6 +369,27 @@ policy или адаптер ROS-команды.
 
 ## Position command shaper
 
+По запросу пользователя ROS pipeline теперь стартует в профиле `direct`:
+`control_smoothing=false`, `min_send_step_deg=0`, `max_joint_velocity=0`.
+Это убирает прежние программные ограничения `30 deg/s`, `60 deg/s²`,
+фильтр shaper и ограничитель `3 rad/s` на выходе ретаргетера.
+Новая цель передаётся на ближайшем цикле bridge (50 Hz).
+Ни суставные пределы, ни прошивка, P/D gains или температурный предел не меняются.
+Физическая скорость всё ещё зависит от приводов, нагрузки и собственных
+ограничений DGSDK; совпадение с быстрым движением VR нельзя гарантировать.
+Внутренние фильтры Hybrid/DexPilot оставлены прежними.
+
+Для возврата программного сглаживания при запуске:
+
+```bash
+DG5F_CONTROL_SMOOTHING=true DG5F_MAX_JOINT_VELOCITY=3.0 \
+  bash scripts/stack.sh hardware 10000 hybrid 169.254.186.72
+```
+
+Параметры скорости ниже действуют только в профиле `smoothed`.
+У прямого LeRobot API `Dg5fConfig` прежние defaults сохранены; для direct
+нужно явно передать `control_smoothing=False, min_send_step_deg=0.0`.
+
 Основная realtime-логика находится в
 `src/lerobot_robot_dg5f/lerobot_robot_dg5f/command_shaper.py`, а не в ROS
 bridge. Поэтому одинаковое поведение получают ROS, прямой LeRobot API,
@@ -350,7 +408,7 @@ teleoperator и будущая policy.
 | `response_time_s` | `0.15 s` |
 | `filter_tau_s` | `0.05 s` |
 | `target_deadband_deg` | `0.20 deg` |
-| `min_send_step_deg` | `0.20 deg` |
+| `min_send_step_deg` | `0.0 deg` (ROS direct profile) |
 | `max_dt_s` | `0.05 s` |
 | `initial_feedback_timeout_s` | `2.0 s` |
 | `telemetry_drain_limit` | `16 samples` |
@@ -454,9 +512,49 @@ DGSDK, измеренные position/velocity/current/temperature и tracking er
 останавливается.
 
 Опциональный постоянный ping включается `debug-record --ping`. Захват TCP
-выключен по умолчанию; `debug-record --tcpdump` попытается создать
-`dg5f_tcp.pcap`, а при отсутствии `tcpdump` или прав продолжит основную запись
-и оставит объяснение в `tcpdump.log`. Ни один из режимов не меняет адрес,
+выключен по умолчанию. Для следующего эксперимента рекомендуется:
+
+```bash
+# Установить на HOST один раз, если утилит нет:
+sudo apt install iputils-ping tcpdump
+# Вместо обычного debug-record:
+bash scripts/stack.sh debug-record-network
+```
+
+То же самое: `bash scripts/stack.sh debug-record --ping --tcpdump`.
+Host helper `scripts/dg5f_network_capture.sh` запрашивает sudo только для
+пассивного tcpdump. Он запускает ping `-D -i 0.1`, tcpdump с фильтром
+`host 169.254.186.72 and tcp port 502` и записывает sysfs counters, carrier,
+operstate и изменения link на host. Если tcpdump/права недоступны, запись
+ROS продолжается: результат будет явно указан в `network_status.json` и
+`tcpdump.log`. Проверяйте `tcpdump_enabled: true`, если нужен анализ TCP.
+Для другого интерфейса: `DG5F_NETWORK_INTERFACE=... bash scripts/stack.sh debug-record-network`.
+Все файлы попадают в один эксперимент и один tar.gz **после закрытия pcap**.
+
+При fault сначала сохраните состояние, не перезапуская pipeline:
+
+```bash
+bash scripts/stack.sh dg-status
+bash scripts/stack.sh debug-mark after_fault
+```
+
+Для отдельной проверки восстановления дождитесь возврата транспорта,
+освободите кисть от контакта и снова выполните `bash scripts/stack.sh arm`.
+Оставьте recorder работающим на это время: он запишет `ARM_REQUESTED` и
+`RECOVERY_STARTED/SUCCEEDED/FAILED`. Если восстановление сейчас не проверяете,
+просто завершите recorder через Ctrl+C после `dg-status`.
+Не запускайте `sdk-check` одновременно с physical pipeline: он создаёт SDK-клиент.
+
+CSV v2 сохраняет старые колонки и добавляет причины, ages, raw ток/скорость,
+wall time. `events.jsonl` содержит snapshot при disconnect/reconnect, включая
+частоту связи 100/500/1000 мс назад. Snapshot — ближайший принятый ROS-снимок;
+для точных времен TCP используйте pcap. Manifest хранит пары wall/monotonic
+времени, единицы, конфигурацию из файла и полученные runtime-параметры bridge.
+`diagnostics_age_ms` позволяет отличить остановку ROS-потока от неизменных
+значений SDK. Summary группирует disarm по причинам и показывает фактическую
+доступность сетевого захвата. Старые hardware-архивы сохраняются без изменений.
+
+Ни один из режимов записи не меняет адрес,
 маршрут, NetworkManager или состояние сетевого интерфейса.
 
 Показ экрана Quest и запись rosbag:

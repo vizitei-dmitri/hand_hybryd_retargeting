@@ -2,10 +2,12 @@ import csv
 import json
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from std_msgs.msg import String
 
-from lerobot_robot_dg5f.debug_recorder import _parse_diagnostics
+from lerobot_robot_dg5f.debug_recorder import _parse_diagnostics, Dg5fDebugRecorder
 from lerobot_robot_dg5f.debug_recording import DebugRunWriter
 
 
@@ -151,3 +153,48 @@ def test_fake_ros_diagnostics_are_decoded_without_hardware():
     assert decoded["transport_connected"] is False
     assert decoded["disconnect_count"] == 1
     assert decoded["latest_command_deg"] == list(range(20))
+
+
+def test_fault_snapshot_preserves_rate_history_ages_and_reasons(tmp_path):
+    clock = FakeClock()
+    writer = DebugRunWriter(tmp_path, {}, clock=clock, run_stamp="fault")
+    for i in range(31):
+        clock.now = 100 + i / 30
+        writer.record(snapshot(communication_rate_hz=430, disarm_reason="NONE"))
+    clock.now = 101.1
+    writer.record(snapshot(communication_rate_hz=100))
+    clock.now = 101.3
+    writer.record(snapshot(communication_rate_hz=0))
+    clock.now = 101.4
+    fault = snapshot(transport_connected=False, armed=False, motion_ready=False,
+                     telemetry_valid=False, temperature_safe=True,
+                     disarm_reason="SDK_DISCONNECTED", motion_ready_reason="DISCONNECTED",
+                     last_telemetry_age_ms=640, last_sdk_packet_age_ms=640,
+                     raw_current=[311] * 20, raw_velocity=[12] * 20,
+                     communication_rate_hz=0)
+    writer.record(fault)
+    writer.record(fault)
+    writer.finalize()
+    events = [json.loads(line) for line in (writer.run_dir / "events.jsonl").read_text().splitlines()]
+    disconnect = next(e for e in events if e["event"] == "DGSDK_DISCONNECTED")
+    assert disconnect["snapshot"]["communication_rate_500ms_ago"] == 430
+    assert disconnect["snapshot"]["last_telemetry_age_ms"] == 640
+    assert disconnect["snapshot"]["raw_current_0"] == 311
+    assert next(e for e in events if e["event"] == "DISARMED")["reason"] == "SDK_DISCONNECTED"
+    assert sum(e["event"] == "TELEMETRY_STALE" for e in events) == 1
+    assert "SDK_DISCONNECTED" in (writer.run_dir / "summary.txt").read_text()
+
+
+def test_brief_arm_disarm_between_samples_recorded_once_with_reason(tmp_path):
+    clock = FakeClock()
+    writer = DebugRunWriter(tmp_path, {}, clock=clock, arm_events_from_bridge=True)
+    node = SimpleNamespace(writer=writer)
+    for name, reason in (("ARMED", "NONE"), ("DISARMED", "USER_REQUEST")):
+        Dg5fDebugRecorder._on_event(node, String(data=json.dumps({
+            "event": name, "reason": reason, "source_monotonic_s": 100.01,
+        })))
+    writer.record(snapshot(armed=False))
+    writer.finalize()
+    assert writer.event_counts["ARMED"] == 1
+    assert writer.event_counts["DISARMED"] == 1
+    assert writer.reason_counts["DISARMED"] == {"USER_REQUEST": 1}

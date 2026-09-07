@@ -95,6 +95,14 @@ class MockDg5fBackend:
             "control_running": connected,
             "control_thread_alive": connected,
             "motion_ready": connected,
+            "motion_ready_reason": "READY" if connected else "DISCONNECTED",
+            "recovery_required": False,
+            "last_telemetry_age_ms": 0.0,
+            "last_sdk_packet_age_ms": 0.0,
+            "last_position_sample_age_ms": 0.0,
+            "last_communication_callback_age_ms": 0.0,
+            "raw_current": np.zeros(20),
+            "raw_velocity": np.zeros(20),
             "system_started": connected,
             "telemetry_valid": connected,
             "temperature_safe": connected,
@@ -150,7 +158,11 @@ class TesolloDg5fBackend:
         self._api = dg5f_python.DGApi.instance(
             self.ip, int(self.port), int(self.slave_id)
         )
-        self._api.start(self.servo_keepalive)
+        try:
+            self._api.start(self.servo_keepalive)
+        except Exception:
+            self._api.stop()
+            raise
         self._connected = True
 
     def disconnect(self) -> None:
@@ -230,6 +242,11 @@ class TesolloDg5fBackend:
             return {}
         return dict(get_status())
 
+    def recover(self, timeout_s: float) -> np.ndarray:
+        if self._api is None or not self._connected:
+            raise RuntimeError("DGSDK session is not initialized")
+        return np.asarray(self._api.recover(timeout_s), dtype=np.float64)
+
     def _read_latest(
         self, method_name: str, drain_limit: int
     ) -> Optional[np.ndarray]:
@@ -270,13 +287,25 @@ class TesolloDg5fBackend:
     ) -> dict[str, Optional[np.ndarray]]:
         if not self._connected or self._api is None:
             raise RuntimeError("Tesollo DG5F backend is not connected")
+        status = self.read_control_status()
+        if "measured_pos" in status:
+            # Snapshot is copied under the SDK callback mutex, no queue lag.
+            return {
+                "pos": np.asarray(status["measured_pos"], dtype=np.float64),
+                "vel": np.asarray(status["raw_velocity"], dtype=np.float64) * 6.0,
+                "current": np.asarray(status["measured_current"], dtype=np.float64),
+                "temp": np.asarray(status["measured_temp"], dtype=np.float64),
+            }
         method_by_field = {
             "pos": "get_current_position",
             "vel": "get_current_velocity",
             "current": "get_current_current",
             "temp": "get_current_temp",
         }
-        return {
+        telemetry = {
             field: self._read_latest(method_by_field[field], drain_limit)
             for field in TELEMETRY_FIELDS
         }
+        if telemetry["vel"] is not None:
+            telemetry["vel"] *= 6.0  # rpm -> deg/s (ROS subsequently uses rad/s)
+        return telemetry

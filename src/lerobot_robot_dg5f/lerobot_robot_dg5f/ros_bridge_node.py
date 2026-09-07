@@ -1,20 +1,25 @@
 """ROS transport, watchdog and arming bridge to the DG5F LeRobot plugin."""
 
 import time
+import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import numpy as np
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from rclpy.node import Node
+from rclpy.task import Future
+from rclpy.callback_groups import ReentrantCallbackGroup
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Float32MultiArray
+from std_msgs.msg import Bool, Float32MultiArray, String
 from std_srvs.srv import SetBool
 from trajectory_msgs.msg import JointTrajectory
 
 from .config_dg5f import Dg5fConfig
 from .constants import BROKEN_PINKY_JOINT, JOINT_NAMES
 from .dg5f import Dg5f
+from .health import age_ms, disarm_reason
 
 
 def trajectory_to_degrees(message: JointTrajectory) -> np.ndarray:
@@ -71,6 +76,7 @@ class Dg5fLeRobotBridge(Node):
         self.declare_parameter("command_rate_hz", 50.0)
         self.declare_parameter("state_rate_hz", 30.0)
         self.declare_parameter("command_timeout", 0.35)
+        self.declare_parameter("tracking_timeout", 0.35)
         self.declare_parameter("control_smoothing", True)
         self.declare_parameter("max_speed_deg_s", 30.0)
         self.declare_parameter("max_accel_deg_s2", 60.0)
@@ -150,6 +156,12 @@ class Dg5fLeRobotBridge(Node):
         )
         self._latest_command_deg: Optional[np.ndarray] = None
         self._last_command_time: Optional[float] = None
+        self._last_tracking_time: Optional[float] = None
+        self._disarm_reason = "NONE"
+        self._recovery_state = "IDLE"
+        self._arm_pending = False
+        self._arm_epoch = 0
+        self._workers = ThreadPoolExecutor(max_workers=1)
         self._last_warning_time = -1e9
 
         self._joint_state_pub = self.create_publisher(
@@ -174,6 +186,7 @@ class Dg5fLeRobotBridge(Node):
             str(self.get_parameter("diagnostics_topic").value),
             5,
         )
+        self._events_pub = self.create_publisher(String, "/dg5f/lerobot/events", 100)
         self._command_sub = self.create_subscription(
             JointTrajectory,
             str(self.get_parameter("command_topic").value),
@@ -190,6 +203,7 @@ class Dg5fLeRobotBridge(Node):
             SetBool,
             str(self.get_parameter("enable_service").value),
             self._on_enable,
+            callback_group=ReentrantCallbackGroup(),
         )
 
         command_hz = float(self.get_parameter("command_rate_hz").value)
@@ -221,54 +235,111 @@ class Dg5fLeRobotBridge(Node):
             self._warn_throttled(f"Ignoring unsafe DG5F command: {error}")
 
     def _on_tracking(self, message: Bool) -> None:
+        self._last_tracking_time = self._now_seconds()
         self._tracking_ok = bool(message.data)
-        if not self._tracking_ok:
+        if not self._tracking_ok and not self._arm_pending:
             self._robot.hold_position()
         if not self._tracking_ok and self._backend_name == "tesollo":
-            self._armed = False
+            self._disarm("TRACKING_TIMEOUT")
 
-    def _on_enable(self, request: SetBool.Request, response: SetBool.Response):
-        if request.data:
-            if not self._robot.is_connected:
-                response.success = False
-                response.message = "DG5F backend is not connected"
-                return response
-            if self._latest_command_deg is None:
-                response.success = False
-                response.message = "No valid DG5F command has been received"
-                return response
-            if (
-                bool(self.get_parameter("require_tracking").value)
-                and not self._tracking_ok
-            ):
-                response.success = False
-                response.message = "Hand tracking is not healthy"
-                return response
-            timeout = float(self.get_parameter("command_timeout").value)
-            if not command_is_fresh(
-                self._last_command_time, self._now_seconds(), timeout
-            ):
-                response.success = False
-                response.message = "Latest DG5F command is stale"
-                return response
-        self._armed = bool(request.data)
-        if not self._armed:
+    def _event(self, name, **details):
+        self._events_pub.publish(String(data=json.dumps({
+            "event": name, "source_monotonic_s": time.monotonic(), **details,
+        })))
+
+    def _disarm(self, reason):
+        if self._armed:
+            self._armed = False
+            self._disarm_reason = reason
             self._robot.hold_position()
-        response.success = True
-        response.message = "DG5F output enabled" if self._armed else "DG5F output disabled"
+            self._event("DISARMED", reason=reason)
+
+    def _input_failure(self):
+        now = self._now_seconds()
+        if bool(self.get_parameter("require_tracking").value):
+            if not self._tracking_ok or not command_is_fresh(
+                self._last_tracking_time, now,
+                float(self.get_parameter("tracking_timeout").value),
+            ):
+                return "TRACKING_TIMEOUT"
+        if not command_is_fresh(self._last_command_time, now,
+                                float(self.get_parameter("command_timeout").value)):
+            return "COMMAND_TIMEOUT"
+        return None
+
+    async def _on_enable(self, request: SetBool.Request, response: SetBool.Response):
+        if not request.data:
+            self._arm_epoch += 1  # Cancel any recovery/preflight in progress.
+            self._disarm("USER_REQUEST")
+            response.success, response.message = True, "DG5F output disabled"
+            return response
+        self._event("ARM_REQUESTED")
+        if self._arm_pending:
+            response.success, response.message = False, "ARM FAILED: recovery already running"
+            return response
+        if self._armed:
+            response.success, response.message = True, "DG5F output already enabled"
+            return response
+        epoch = self._arm_epoch
+        recovering = False
+        try:
+            failure = self._input_failure()
+            if failure:
+                raise RuntimeError(failure)
+            status = self._robot.get_diagnostics()
+            recovering = bool(status.get("recovery_required")) or not status.get("motion_ready")
+            self._arm_pending = True
+            if recovering:
+                self._recovery_state = "STARTED"
+                self._event("RECOVERY_STARTED")
+                self._latest_command_deg = None
+                self._last_command_time = None
+            # ROS timers/subscriptions keep running during a bounded SDK wait.
+            pending = Future(executor=self.executor)
+            worker = self._workers.submit(self._robot.prepare_arm)
+
+            def complete(job):
+                try:
+                    pending.set_result(job.result())
+                except Exception as error:
+                    pending.set_exception(error)
+            worker.add_done_callback(complete)
+            await pending
+            if epoch != self._arm_epoch:
+                raise RuntimeError("USER_REQUEST: arm cancelled")
+            failure = self._input_failure()
+            if failure or self._latest_command_deg is None:
+                raise RuntimeError(failure or "COMMAND_TIMEOUT")
+            status = self._robot.get_diagnostics()
+            failure = disarm_reason(status)
+            if failure != "NONE":
+                raise RuntimeError(failure)
+            if recovering:
+                self._recovery_state = "SUCCEEDED"
+                self._event("RECOVERY_SUCCEEDED")
+            self._disarm_reason = "NONE"
+            self._armed = True
+            self._event("ARMED")
+            response.success, response.message = True, "DG5F output enabled (preflight OK)"
+        except Exception as error:
+            self._armed = False
+            self._disarm_reason = "RECOVERY_FAILED" if recovering else str(error)
+            if recovering:
+                self._recovery_state = "FAILED"
+                self._event("RECOVERY_FAILED", reason=str(error))
+            response.success, response.message = False, f"ARM FAILED: {error}"
+        finally:
+            self._arm_pending = False
         self.get_logger().warning(response.message)
         return response
 
     def _send_latest(self) -> None:
         if not self._armed or self._latest_command_deg is None:
             return
-        timeout = float(self.get_parameter("command_timeout").value)
-        if not command_is_fresh(
-            self._last_command_time, self._now_seconds(), timeout
-        ):
-            self._armed = False
-            self._robot.hold_position()
-            self._warn_throttled("Command timeout: LeRobot output was disarmed")
+        failure = self._input_failure()
+        if failure:
+            self._disarm(failure)
+            self._warn_throttled(f"{failure}: LeRobot output was disarmed")
             return
         if bool(self.get_parameter("require_tracking").value) and not self._tracking_ok:
             return
@@ -280,8 +351,11 @@ class Dg5fLeRobotBridge(Node):
         try:
             sent = self._robot.send_action(action)
         except Exception as error:
-            self._armed = False
-            self._robot.hold_position()
+            try:
+                reason = disarm_reason(self._robot.get_diagnostics())
+            except Exception:
+                reason = "INTERNAL_ERROR"
+            self._disarm(reason if reason != "NONE" else "SDK_COMMAND_REJECTED")
             self.get_logger().error(f"LeRobot command failed; output disarmed: {error}")
             return
         self._publish_commanded_state(sent)
@@ -315,10 +389,10 @@ class Dg5fLeRobotBridge(Node):
                 diagnostics.get("connected", self._robot.is_connected),
             )
         )
-        if not transport_connected and self._armed:
-            self._armed = False
-            self._robot.hold_position()
-            self._warn_throttled("DGSDK transport disconnected; output was disarmed")
+        if self._armed:
+            reason = disarm_reason(diagnostics)
+            if reason != "NONE":
+                self._disarm(reason)
 
         self._connected_pub.publish(Bool(data=transport_connected))
         self._armed_pub.publish(Bool(data=self._armed))
@@ -398,6 +472,16 @@ class Dg5fLeRobotBridge(Node):
         snapshot = dict(values)
         snapshot["armed"] = self._armed
         snapshot["tracking_ok"] = self._tracking_ok
+        snapshot["disarm_reason"] = self._disarm_reason
+        snapshot["recovery_state"] = self._recovery_state
+        snapshot["last_command_age_ms"] = age_ms(self._last_command_time, self._now_seconds())
+        snapshot["last_tracking_age_ms"] = age_ms(self._last_tracking_time, self._now_seconds())
+        snapshot["backend"] = self._backend_name
+        snapshot["control_smoothing"] = self.get_parameter("control_smoothing").value
+        snapshot["command_profile"] = "smoothed" if snapshot["control_smoothing"] else "direct"
+        for name in ("max_speed_deg_s", "max_accel_deg_s2", "response_time_s",
+                     "filter_tau_s", "target_deadband_deg", "min_send_step_deg"):
+            snapshot[name] = self.get_parameter(name).value
 
         measured_pos = np.asarray(
             snapshot.get("measured_pos", np.full(len(JOINT_NAMES), np.nan)),
@@ -447,6 +531,8 @@ class Dg5fLeRobotBridge(Node):
         self._diagnostics_pub.publish(message)
 
     def destroy_node(self):
+        if hasattr(self, "_workers"):
+            self._workers.shutdown(wait=True)
         if hasattr(self, "_robot") and self._robot.is_connected:
             self._robot.disconnect()
         return super().destroy_node()

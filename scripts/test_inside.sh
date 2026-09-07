@@ -19,3 +19,4 @@ run_package_tests /workspace/src/dg5f_teleop
 run_package_tests /workspace/src/dg5f_unity_teleop
 run_package_tests /workspace/src/lerobot_robot_dg5f
 run_package_tests /workspace/src/ros_tcp_endpoint
+bash /workspace/scripts/test_sdk_fake.sh

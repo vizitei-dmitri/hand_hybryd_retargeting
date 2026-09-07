@@ -1,4 +1,7 @@
 #include "control.hpp"
+#include <cmath>
+#include <limits>
+#include <stdexcept>
 
 using namespace handcontrol;
 
@@ -23,7 +26,7 @@ _current_temperature_buffer(16)
 {
     this->_port = port;
     this->_slaveID = slaveID;
-    std::memcpy(this->_ip, ip, MAX_GRIPPER_IP_ADDRESS_SIZE);
+    std::snprintf(this->_ip, sizeof(this->_ip), "%s", ip);
 
     _msgTargetPos << 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0;
     _msgCurrentPos << 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0;
@@ -55,8 +58,10 @@ void DGControl::_DisconnectedCallback()
     if (control->_g_connected.exchange(false))
     {
         control->_disconnectCount.fetch_add(1);
+        control->_recoveryRequired.store(true);
+        control->_systemStarted.store(false);
+        std::cerr << "DGSDK disconnected callback\n";
     }
-    std::cerr << "DGSDK disconnected callback\n";
 }
 
 void DGControl::_ReceivedGripperDataCallback(ReceivedGripperData data)
@@ -65,13 +70,18 @@ void DGControl::_ReceivedGripperDataCallback(ReceivedGripperData data)
     {
         std::lock_guard<std::mutex> lock(control->_gripperDataMutex);
         control->_g_gripperData = data;
+        bool safe = true;
+        for (int i = 0; i < MAX_JOINT_COUNT; ++i)
+            safe = safe && std::isfinite(data.temperature[i]) && data.temperature[i] < control->_tempLimit;
+        control->_temperatureSafe.store(safe);
+        control->_lastTelemetryNs.store(steadyNowNs());
     }
-    control->_lastTelemetryNs.store(steadyNowNs());
 }
 
 void DGControl::_CommunicationPeriodCallback(int period)
 {
     getInstance()->_g_commPeriod = period;
+    getInstance()->_lastCommunicationNs.store(steadyNowNs());
 }
 
 void DGControl::_DiagnosisCallback(DiagnosisSystem diag)
@@ -117,6 +127,10 @@ void DGControl::_setCallbacks()
 
 void DGControl::start(bool servoKeepalive)
 {
+    if (_control.joinable()) throw std::runtime_error("DGControl already started");
+    _stopRequested.store(false);
+    _recoveryRequired.store(false);
+    _temperatureSafe.store(false);
     int success = 0;
     DG_RESULT result;
 
@@ -147,7 +161,10 @@ void DGControl::start(bool servoKeepalive)
     std::cout << "ConnectToGripper: " << result << "\n";
     success += result;
 
+    const auto connectDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (!_g_connected.load()) {
+        if (std::chrono::steady_clock::now() >= connectDeadline)
+            throw std::runtime_error("DGSDK connection timeout");
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
@@ -165,7 +182,10 @@ void DGControl::start(bool servoKeepalive)
 
     // --------------------------
 
-    while (_g_commPeriod.load() < 200) {
+    const auto telemetryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!isTelemetryValid()) {
+        if (std::chrono::steady_clock::now() >= telemetryDeadline)
+            throw std::runtime_error("DGSDK initial telemetry timeout");
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
@@ -178,7 +198,7 @@ void DGControl::start(bool servoKeepalive)
     }
     _tempPos[16] = 0.0;
     _servoKeepaliveEnabled.store(servoKeepalive);
-    _temperatureSafe.store(false);
+    if (!_temperatureSafe.load()) throw std::runtime_error("DGSDK temperature unsafe");
     _lastMotionResult.store(DG_RESULT_NONE);
 
     result = SystemStart();
@@ -221,15 +241,14 @@ void DGControl::stop()
 {
     // Do not send a position command during shutdown.  In particular, a
     // DISARMED high-level controller must never cause an implicit movement.
-    _g_connected.store(false);
+    _stopRequested.store(true);
     if (_control.joinable()) _control.join();
     _controlRunning.store(false);
-    _temperatureSafe.store(false);
-    _lastTelemetryNs.store(0);
     _g_commPeriod.store(0);
     if (_systemStarted.exchange(false)) SystemStop();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     DisconnectToGripper();
+    _g_connected.store(false);
 
     std::cout << "Disconnected\n";
 }
@@ -254,14 +273,26 @@ void DGControl::_loop()
     auto next = std::chrono::steady_clock::now();
     _controlRunning.store(true);
 
-    while(_g_connected.load())
+    while(!_stopRequested.load())
     {
+        std::unique_lock<std::mutex> motionLock(_motionMutex);
+        if (!_g_connected.load())
+        {
+            while (_target_joint_buffer.pop(_msgTargetPos)) {}
+            motionLock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            next = std::chrono::steady_clock::now();
+            continue;
+        }
         {
             std::lock_guard<std::mutex> lock(_gripperDataMutex);
-            std::memcpy(_currentPos, _g_gripperData.joint, sizeof(_g_gripperData.joint));
-            std::memcpy(_currentCur, _g_gripperData.current, sizeof(_g_gripperData.current));
-            std::memcpy(_currentVel, _g_gripperData.velocity, sizeof(_g_gripperData.velocity));
-            std::memcpy(_currentTemp, _g_gripperData.temperature, sizeof(_g_gripperData.temperature));
+            for (int i = 0; i < MAX_JOINT_COUNT; ++i)
+            {
+                _currentPos[i] = static_cast<float>(_g_gripperData.joint[i]);
+                _currentCur[i] = static_cast<float>(_g_gripperData.current[i]); // mA
+                _currentVel[i] = static_cast<float>(_g_gripperData.velocity[i]); // rpm
+                _currentTemp[i] = static_cast<float>(_g_gripperData.temperature[i]); // C
+            }
         }
 
         array2EigenArray(_currentPos, _msgCurrentPos);
@@ -274,8 +305,9 @@ void DGControl::_loop()
         _current_velocity_buffer.push(_msgCurrentVel);
         _current_temperature_buffer.push(_msgCurrentTemp);
 
-        const bool temperatureSafe = _checkTemp();
-        _temperatureSafe.store(temperatureSafe);
+        const bool temperatureSafe = _temperatureSafe.load();
+        if (!isTelemetryValid() || !temperatureSafe || _lastMotionResult.load() != DG_RESULT_NONE)
+            _recoveryRequired.store(true);
 
         // Always consume the mailbox.  If motion is unsafe, discard pending
         // targets so they cannot execute later after the fault clears.
@@ -287,13 +319,14 @@ void DGControl::_loop()
 
         // Do not call MoveServoJoint before the first accepted target.  This
         // is what makes connect() and DISARMED genuinely motion-free.
-        if (hasTarget && temperatureSafe)
+        const bool mayMove = isMotionReady();
+        if (hasTarget && mayMove)
         {
             eigenArray2Array(_msgTargetPos, _targetPos);
             _updatePos();
         }
 
-        if (temperatureSafe && (hasTarget || _servoKeepaliveEnabled.load()))
+        if (mayMove && (hasTarget || _servoKeepaliveEnabled.load()))
         {
             _tempPos[16] = 0.0;         // Зануление для безопасности дефектного 16 джоинта
             const DG_RESULT result = MoveServoJoint(_tempPos);
@@ -306,6 +339,8 @@ void DGControl::_loop()
             }
         }
 
+        motionLock.unlock();
+
         next += controlPeriod;
         const auto now = std::chrono::steady_clock::now();
         if (next < now)
@@ -317,7 +352,6 @@ void DGControl::_loop()
     }
 
     _controlRunning.store(false);
-    _temperatureSafe.store(false);
 }
 
 void DGControl::_updatePos()
@@ -348,9 +382,8 @@ bool DGControl::_checkTemp()
 
 bool DGControl::setTragetPosition(const Eigen::Array<double,MAX_JOINT_COUNT,1> &position)
 {
-    if (!_g_connected.load() || !_controlRunning.load() ||
-        !_temperatureSafe.load() ||
-        _lastMotionResult.load() != DG_RESULT_NONE)
+    std::lock_guard<std::mutex> lock(_motionMutex);
+    if (!isMotionReady() || !position.isFinite().all())
     {
         return false;
     }
@@ -381,13 +414,6 @@ bool DGControl::getCurrentTemperature(Eigen::Array<double,MAX_JOINT_COUNT,1> &te
 
 bool DGControl::setTragetPosition(const float* position)
 {
-    if (!_g_connected.load() || !_controlRunning.load() ||
-        !_temperatureSafe.load() ||
-        _lastMotionResult.load() != DG_RESULT_NONE)
-    {
-        return false;
-    }
-
     Eigen::Array<double,MAX_JOINT_COUNT,1> array;
 
     for(int8_t i = 0; i < MAX_JOINT_COUNT; ++i)
@@ -395,7 +421,7 @@ bool DGControl::setTragetPosition(const float* position)
         array(i) = position[i];
     }
     
-    return _target_joint_buffer.push(array);
+    return setTragetPosition(array);
 }
 
 bool DGControl::isConnected() const
@@ -425,12 +451,100 @@ bool DGControl::isServoKeepaliveEnabled() const
 
 bool DGControl::isMotionReady() const
 {
-    return _g_connected.load() &&
-           _controlRunning.load() &&
-           _systemStarted.load() &&
-           isTelemetryValid() &&
-           _temperatureSafe.load() &&
-           _lastMotionResult.load() == DG_RESULT_NONE;
+    return motionReadyReason() == "READY";
+}
+
+std::string DGControl::motionReadyReason() const
+{
+    if (!_g_connected.load()) return "DISCONNECTED";
+    if (!_controlRunning.load()) return "CONTROL_THREAD_STOPPED";
+    if (!isTelemetryValid()) return "TELEMETRY_STALE";
+    if (!_temperatureSafe.load()) return "TEMPERATURE_UNSAFE";
+    if (!_systemStarted.load()) return "SYSTEM_NOT_STARTED";
+    if (_lastMotionResult.load() != DG_RESULT_NONE) return "MOTION_RESULT_ERROR";
+    if (_recoveryRequired.load()) return "RECOVERY_REQUIRED";
+    return "READY";
+}
+
+double DGControl::telemetryAgeMs() const
+{
+    const auto last = _lastTelemetryNs.load();
+    return last > 0 ? (steadyNowNs() - last) / 1e6 : std::numeric_limits<double>::quiet_NaN();
+}
+
+double DGControl::communicationAgeMs() const
+{
+    const auto last = _lastCommunicationNs.load();
+    return last > 0 ? (steadyNowNs() - last) / 1e6 : std::numeric_limits<double>::quiet_NaN();
+}
+
+bool DGControl::getTelemetry(float* position, float* current, float* velocity, float* temperature) const
+{
+    std::lock_guard<std::mutex> lock(_gripperDataMutex);
+    if (_lastTelemetryNs.load() == 0) return false;
+    for (int i = 0; i < MAX_JOINT_COUNT; ++i)
+    {
+        position[i] = static_cast<float>(_g_gripperData.joint[i]);
+        current[i] = static_cast<float>(_g_gripperData.current[i]);
+        velocity[i] = static_cast<float>(_g_gripperData.velocity[i]);
+        temperature[i] = static_cast<float>(_g_gripperData.temperature[i]);
+    }
+    return true;
+}
+
+void DGControl::recover(float* measuredPose, double timeoutSeconds)
+{
+    // Only the explicit ARM path calls this. Never replay a pre-fault mailbox.
+    std::lock_guard<std::mutex> lock(_motionMutex);
+    _recoveryRequired.store(true);
+    while (_target_joint_buffer.pop(_msgTargetPos)) {}
+    if (!_g_connected.load()) throw std::runtime_error("DGSDK transport not connected");
+    if (!_controlRunning.load()) throw std::runtime_error("control thread stopped");
+    if (!std::isfinite(timeoutSeconds) || timeoutSeconds <= 0 || timeoutSeconds > 10)
+        throw std::runtime_error("invalid recovery timeout");
+    const auto generation = _disconnectCount.load();
+    const auto requestedAt = steadyNowNs();
+    if (!_systemStarted.load())
+    {
+        const auto result = SystemStart();
+        if (result != DG_RESULT_NONE) throw std::runtime_error("SystemStart failed during recovery");
+        _systemStarted.store(true);
+    }
+    const auto deadline = requestedAt + static_cast<std::int64_t>(timeoutSeconds * 1e9);
+    while (_lastTelemetryNs.load() <= requestedAt)
+    {
+        if (!_g_connected.load() || _disconnectCount.load() != generation)
+            throw std::runtime_error("disconnected during recovery");
+        if (steadyNowNs() > deadline) throw std::runtime_error("telemetry stale during recovery");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    {
+        std::lock_guard<std::mutex> dataLock(_gripperDataMutex);
+        for (int i = 0; i < MAX_JOINT_COUNT; ++i)
+        {
+            if (!std::isfinite(_g_gripperData.joint[i])) throw std::runtime_error("invalid measured pose");
+            if (!std::isfinite(_g_gripperData.temperature[i]) || _g_gripperData.temperature[i] >= _tempLimit)
+                throw std::runtime_error("temperature unsafe during recovery");
+            _tempPos[i] = _g_gripperData.joint[i];
+        }
+    }
+    _tempPos[16] = 0.0f;
+    // Synchronize only to the measured pose. No Quest target is sent here.
+    const auto result = MoveServoJoint(_tempPos);
+    _lastMotionResult.store(result);
+    if (result != DG_RESULT_NONE) throw std::runtime_error("measured-pose hold rejected during recovery");
+    {
+        std::lock_guard<std::mutex> commandLock(_commandMutex);
+        std::copy(_tempPos, _tempPos + MAX_JOINT_COUNT, _latestCommandPos);
+        std::copy(_tempPos, _tempPos + MAX_JOINT_COUNT, measuredPose);
+        _latestCommandValid.store(true);
+    }
+    _recoveryRequired.store(false);
+    if (_disconnectCount.load() != generation || !isMotionReady())
+    {
+        _recoveryRequired.store(true);
+        throw std::runtime_error("hardware not ready after recovery");
+    }
 }
 
 bool DGControl::isTelemetryValid() const

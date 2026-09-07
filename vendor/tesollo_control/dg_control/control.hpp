@@ -14,6 +14,7 @@
 #include <atomic>
 #include <algorithm>
 #include <cstdint>
+#include <string>
 
 #include <Eigen/Dense>
 
@@ -39,6 +40,11 @@ private:
     std::atomic<int> _g_commPeriod{0};
     std::atomic<int> _g_processing{0};
     std::atomic<bool> _controlRunning{false};
+    std::atomic<bool> _stopRequested{false};
+    std::atomic<bool> _recoveryRequired{false};
+    std::atomic<std::int64_t> _lastCommunicationNs{0};
+    // Serialize explicit recovery and output; callbacks only update atomics/data.
+    mutable std::mutex _motionMutex;
     std::atomic<bool> _systemStarted{false};
     std::atomic<bool> _temperatureSafe{false};
     std::atomic<bool> _servoKeepaliveEnabled{true};
@@ -182,6 +188,12 @@ public:
     int getDiagnosisJoint() const;
     int getDiagnosisTemperature() const;
     bool getLatestCommand(float* command) const;
+    std::string motionReadyReason() const;
+    double telemetryAgeMs() const;
+    double communicationAgeMs() const;
+    bool recoveryRequired() const { return _recoveryRequired.load(); }
+    void recover(float* measuredPose, double timeoutSeconds = 2.0);
+    bool getTelemetry(float* position, float* current, float* velocity, float* temperature) const;
 
 };
 

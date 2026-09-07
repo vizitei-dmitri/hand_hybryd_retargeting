@@ -55,6 +55,9 @@ Commands:
                  Passively record DG5F/ROS/network diagnostics (no control)
   debug-mark LABEL
                  Add an event marker to the active passive recording
+  debug-record-network
+                 ROS recorder + host ping, tcpdump and link counters
+  dg-status      Read current ROS diagnostics; no SDK connection
   shell          Open a shell in the container
   logs           Show container logs
   stop           Stop only this project's container
@@ -156,7 +159,7 @@ case "${1:-help}" in
       viewer=false
     fi
     "${compose[@]}" exec "${service}" bash -lc \
-      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
+      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} lerobot_control_smoothing:=${DG5F_CONTROL_SMOOTHING:-false} max_joint_velocity:=${DG5F_MAX_JOINT_VELOCITY:-0.0} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
     ;;
   hardware|hardware-headless)
     require_container
@@ -172,7 +175,7 @@ case "${1:-help}" in
     echo "Starting REAL Tesollo backend at ${hand_ip}:502 in DISARMED state."
     echo "After checking tracking and MuJoCo, use: bash scripts/stack.sh arm"
     "${compose[@]}" exec "${service}" bash -lc \
-      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} lerobot_backend:=tesollo lerobot_auto_enable:=false lerobot_ip:=${hand_ip} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
+      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} lerobot_backend:=tesollo lerobot_auto_enable:=false lerobot_ip:=${hand_ip} lerobot_control_smoothing:=${DG5F_CONTROL_SMOOTHING:-false} max_joint_velocity:=${DG5F_MAX_JOINT_VELOCITY:-0.0} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
     ;;
   arm|disarm)
     require_container
@@ -259,11 +262,14 @@ case "${1:-help}" in
     "${compose[@]}" exec "${service}" bash -lc \
       "${source_workspace}; ros2 bag record -o /workspace/bags/${bag_name} --storage mcap /quest/hand_pose /quest/hand_points /quest/hand_gesture /hands/right/landmarks /dg5f/joint_command /dg5f/target_joint_states /dg5f/joint_states /dg5f/tracking_ok /dg5f/lerobot/joint_states /dg5f/lerobot/commanded_joint_states /dg5f/lerobot/temperatures /dg5f/lerobot/connected /dg5f/lerobot/armed /dg5f/lerobot/diagnostics /dg5f/debug_marker /tf"
     ;;
-  debug-record)
+  debug-record|debug-record-network)
     require_container
     hand_ip="${DG5F_HAND_IP:-169.254.186.72}"
     network_interface="${DG5F_NETWORK_INTERFACE:-enp49s0}"
     extra_args=()
+    if [[ "$1" == debug-record-network ]]; then
+      extra_args=(--ping --tcpdump)
+    fi
     for option in "${@:2}"; do
       case "${option}" in
         --ping|--tcpdump) extra_args+=("${option}") ;;
@@ -273,9 +279,18 @@ case "${1:-help}" in
           ;;
       esac
     done
+    if (( ${#extra_args[@]} )); then
+      exec bash "${script_dir}/dg5f_network_capture.sh" \
+        --interface "${network_interface}" --hand-ip "${hand_ip}" "${extra_args[@]}"
+    fi
     echo "Starting passive recorder. It does not connect to or control DG-5F."
     "${compose[@]}" exec "${service}" bash -lc \
       "${source_workspace}; ros2 run lerobot_robot_dg5f debug_recorder --output-root /workspace/debug_runs --project-dir /workspace --interface ${network_interface} --hand-ip ${hand_ip} ${extra_args[*]}"
+    ;;
+  dg-status)
+    require_container
+    "${compose[@]}" exec "${service}" bash -lc \
+      "${source_workspace}; timeout 8s ros2 topic echo /dg5f/lerobot/diagnostics --once"
     ;;
   debug-mark)
     require_container

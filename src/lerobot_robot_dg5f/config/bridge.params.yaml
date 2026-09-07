@@ -16,13 +16,14 @@ dg5f_lerobot_bridge:
     command_rate_hz: 50.0
     state_rate_hz: 30.0
     command_timeout: 0.35
-    control_smoothing: true
+    tracking_timeout: 0.35
+    control_smoothing: false  # direct profile: no artificial speed/acceleration ramp
     max_speed_deg_s: 30.0
     max_accel_deg_s2: 60.0
     response_time_s: 0.15
     filter_tau_s: 0.05
     target_deadband_deg: 0.20
-    min_send_step_deg: 0.20
+    min_send_step_deg: 0.0
     max_dt_s: 0.05
     initial_feedback_timeout_s: 2.0
     telemetry_drain_limit: 16

@@ -4,6 +4,8 @@ build
 install
 log
 bags
+debug_runs
+debug_runs.zip
 **/__pycache__
 **/.pytest_cache
 *.db3

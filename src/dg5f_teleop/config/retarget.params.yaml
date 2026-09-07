@@ -7,7 +7,7 @@ dg5f_retarget:
     urdf_path: /workspace/models/dg5f/urdf/dg5f_right.urdf
     retargeting_config: /workspace/src/dg5f_teleop/config/dg5f_hybrid.yaml
     scaling_factor: 1.2
-    max_joint_velocity: 3.0
+    max_joint_velocity: 0.0  # no software slew-rate cap; joint limits unchanged
     watchdog_timeout: 0.35
     input_reliability: reliable
     hybrid_dexpilot_config: /workspace/src/dg5f_teleop/config/dg5f_dexpilot.yaml

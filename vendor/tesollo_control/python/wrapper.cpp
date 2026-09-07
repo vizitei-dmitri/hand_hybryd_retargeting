@@ -30,6 +30,14 @@ PYBIND11_MODULE(dg5f_python, m)
             py::arg("servo_keepalive") = true
         )
         .def("stop", &DGControl::stop)
+        .def("recover", [](handcontrol::DGControl& self, double timeout) {
+            float pose[MAX_JOINT_COUNT];
+            {
+                py::gil_scoped_release release;
+                self.recover(pose, timeout);
+            }
+            return to_numpy_copy(pose, MAX_JOINT_COUNT);
+        }, py::arg("timeout_s") = 2.0)
         .def("set_target_position",
             [](handcontrol::DGControl& self,
             py::array_t<float, py::array::c_style | py::array::forcecast> arr)
@@ -115,6 +123,18 @@ PYBIND11_MODULE(dg5f_python, m)
                 status["control_running"] = self.isControlRunning();
                 status["control_thread_alive"] = self.isControlRunning();
                 status["motion_ready"] = self.isMotionReady();
+                status["motion_ready_reason"] = self.motionReadyReason();
+                status["recovery_required"] = self.recoveryRequired();
+                status["last_telemetry_age_ms"] = self.telemetryAgeMs();
+                status["last_position_sample_age_ms"] = self.telemetryAgeMs();
+                // SDK exposes decoded gripper callbacks, not raw TCP packets.
+                status["last_sdk_packet_age_ms"] = self.telemetryAgeMs();
+                status["sdk_packet_age_source"] = "ReceivedGripperData callback (packet proxy)";
+                status["last_communication_callback_age_ms"] = self.communicationAgeMs();
+                status["current_unit"] = "mA";
+                status["raw_velocity_unit"] = "rpm";
+                status["position_unit"] = "degree";
+                status["temperature_unit"] = "C";
                 status["system_started"] = self.isSystemStarted();
                 status["telemetry_valid"] = self.isTelemetryValid();
                 status["temperature_safe"] = self.isTemperatureSafe();
@@ -133,6 +153,16 @@ PYBIND11_MODULE(dg5f_python, m)
                 status["latest_command_valid"] = latest_command_valid;
                 status["latest_command_deg"] =
                     to_numpy_copy(latest_command, MAX_JOINT_COUNT);
+                float position[MAX_JOINT_COUNT], current[MAX_JOINT_COUNT];
+                float velocity[MAX_JOINT_COUNT], temperature[MAX_JOINT_COUNT];
+                if (self.getTelemetry(position, current, velocity, temperature))
+                {
+                    status["measured_pos"] = to_numpy_copy(position, MAX_JOINT_COUNT);
+                    status["measured_current"] = to_numpy_copy(current, MAX_JOINT_COUNT);
+                    status["raw_velocity"] = to_numpy_copy(velocity, MAX_JOINT_COUNT);
+                    status["raw_current"] = to_numpy_copy(current, MAX_JOINT_COUNT);
+                    status["measured_temp"] = to_numpy_copy(temperature, MAX_JOINT_COUNT);
+                }
                 return status;
             }
         );

@@ -168,8 +168,29 @@ class Dg5f(Robot):
             status = dict(self.backend.read_control_status())
 
         for field in TELEMETRY_FIELDS:
-            status[f"measured_{field}"] = self._telemetry[field].copy()
+            status.setdefault(f"measured_{field}", self._telemetry[field].copy())
+        if "raw_velocity" in status:
+            status["measured_vel"] = np.asarray(status["raw_velocity"]) * 6.0
+        status.update(current_unit="mA", raw_velocity_unit="rpm", velocity_unit="degree/s",
+                      position_unit="degree", temperature_unit="C")
         return status
+
+    def prepare_arm(self) -> bool:
+        """Preflight and explicit recovery only; never reseed normal teleop."""
+        status = self.get_diagnostics()
+        if not status.get("transport_connected", False):
+            raise RuntimeError("DGSDK transport not connected")
+        recovered = False
+        if status.get("recovery_required", False) or not status.get("motion_ready", False):
+            pose = self.backend.recover(self.config.initial_feedback_timeout_s)
+            pose = apply_disabled_joints(pose, self.config.disabled_joint_positions_deg)
+            self.command_shaper.reset(pose)
+            self._telemetry["pos"] = pose.copy()
+            recovered = True
+        status = self.get_diagnostics()
+        if not status.get("motion_ready", False):
+            raise RuntimeError(str(status.get("motion_ready_reason", "SDK_NOT_MOTION_READY")))
+        return recovered
 
     def send_action(self, action: RobotAction) -> RobotAction:
         if not self.is_connected:
