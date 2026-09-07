@@ -18,6 +18,27 @@ dg5f_lerobot_bridge:
     state_rate_hz: 30.0
     command_timeout: 0.35
     tracking_timeout: 0.35
+    # After an already-armed hand loses Quest tracking, keep the physical hand
+    # at the last accepted pose for up to 15 s. If tracking returns in time,
+    # resume automatically through a smooth catch-up blend; no new ARM needed.
+    tracking_grace_s: 15.0
+    tracking_resume_blend_s: 1.0
+    # Manual ARM and automatic resume both reseed once from fresh physical pose.
+    arm_pose_max_age_ms: 100.0
+    # Adaptive load guard. These are conservative empirical thresholds from
+    # our debug runs, not Tesollo's published absolute motor limits. Normal
+    # motion stayed <~200 mA/joint; failed runs reached ~900 mA on one joint
+    # and ~1.45 A total immediately before telemetry/Ethernet loss.
+    current_guard_enabled: true
+    current_guard_soft_ma: 350.0
+    current_guard_hard_ma: 650.0
+    current_guard_trip_ma: 850.0
+    current_guard_total_soft_ma: 800.0
+    current_guard_total_hard_ma: 1200.0
+    current_guard_total_trip_ma: 1400.0
+    current_guard_trip_hold_s: 0.06
+    # Restriction attacks immediately but releases over 0.2 s to avoid chatter.
+    current_guard_release_tau_s: 0.20
     control_smoothing: false  # direct profile: no artificial speed/acceleration ramp
     max_speed_deg_s: 30.0
     max_accel_deg_s2: 60.0

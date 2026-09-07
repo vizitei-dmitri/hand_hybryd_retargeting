@@ -144,13 +144,14 @@ class PositionCommandShaper:
         self.last_update_time = timestamp
         self._cancel_blend()
 
-    def begin_arm_blend(self, now: float | None = None) -> None:
+    def begin_arm_blend(
+        self, now: float | None = None, duration_s: float | None = None
+    ) -> None:
         """Start a software-only blend from the current accepted pose.
 
-        This method never sends a hardware command.  It is intended to be
-        called immediately before the high-level bridge transitions to ARMED.
-        The first live VR target is then approached over ``startup_blend_s``
-        instead of being emitted as one large direct-mode step.
+        This method never sends a hardware command. ``duration_s`` may be used
+        for a slower automatic catch-up after temporary tracking loss; when it
+        is omitted the normal ``startup_blend_s`` is used.
         """
         if not self.is_initialized:
             raise RuntimeError("PositionCommandShaper must be reset before arm blend")
@@ -158,12 +159,15 @@ class PositionCommandShaper:
         timestamp = self._clock() if now is None else float(now)
         if not np.isfinite(timestamp):
             raise ValueError("Blend timestamp must be finite")
-        if self.startup_blend_s <= 0.0:
+        duration = self.startup_blend_s if duration_s is None else float(duration_s)
+        if not np.isfinite(duration) or duration < 0.0:
+            raise ValueError("Blend duration must be finite and non-negative")
+        if duration <= 0.0:
             self._cancel_blend()
             return
         self._blend_origin_deg = self.command_pose_deg.copy()
         self._blend_start_time = timestamp
-        self._blend_duration_s = self.startup_blend_s
+        self._blend_duration_s = duration
 
     def _cancel_blend(self) -> None:
         self._blend_origin_deg = None

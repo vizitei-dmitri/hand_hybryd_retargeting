@@ -35,6 +35,7 @@ ARRAY_FIELDS = (
 BOOL_FIELDS = (
     "tracking_ok",
     "armed",
+    "current_guard_active",
     "transport_connected",
     "control_thread_alive",
     "motion_ready",
@@ -58,6 +59,10 @@ STATUS_FIELDS = (
     "disarm_reason",
     "motion_ready_reason",
     "recovery_state",
+    "current_guard_min_scale",
+    "current_guard_max_current_ma",
+    "current_guard_total_current_ma",
+    "current_guard_limited_joints",
     "last_command_age_ms",
     "last_tracking_age_ms",
     "last_telemetry_age_ms",

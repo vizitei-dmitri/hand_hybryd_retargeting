@@ -204,9 +204,10 @@ class Dg5f(Robot):
     def recover(self) -> np.ndarray:
         """Explicitly recover a faulted DGSDK session while remaining disarmed.
 
-        Recovery is the *only* path allowed to reseed the software command
-        state from measured feedback.  The low-level backend first waits for a
-        fresh physical pose before it may restart the servo system.
+        Recovery reseeds the software command state after the low-level session
+        has been restored. Manual ARM and tracking auto-resume may also perform
+        a one-shot software reseed from already-fresh feedback, but never on
+        every control tick.
         """
         pose = self.backend.recover(self.config.initial_feedback_timeout_s)
         pose = apply_disabled_joints(pose, self.config.disabled_joint_positions_deg)
@@ -217,9 +218,49 @@ class Dg5f(Robot):
             raise RuntimeError(str(status.get("motion_ready_reason", "SDK_NOT_MOTION_READY")))
         return pose.copy()
 
-    def begin_arm_blend(self) -> None:
-        """Prepare a software-only blend before enabling live hardware output."""
-        self.command_shaper.begin_arm_blend()
+    def begin_arm_blend_from_feedback(
+        self, *, max_pose_age_ms: float, duration_s: float | None = None
+    ) -> np.ndarray:
+        """Reseed once from fresh physical feedback, then start a safe blend.
+
+        This is intentionally used only at a discrete transition (manual ARM
+        or automatic resume after tracking loss), never on every control tick.
+        No hardware command is sent by this method.
+        """
+        if not self.is_connected:
+            raise RuntimeError("DG5F is not connected")
+        if not np.isfinite(max_pose_age_ms) or max_pose_age_ms <= 0.0:
+            raise ValueError("max_pose_age_ms must be finite and positive")
+
+        status = self.backend.read_control_status()
+        if not status.get("telemetry_valid", False):
+            raise RuntimeError("PHYSICAL_POSE_STALE")
+        age = float(status.get("last_position_sample_age_ms", float("inf")))
+        if not np.isfinite(age) or age > max_pose_age_ms:
+            raise RuntimeError("PHYSICAL_POSE_STALE")
+
+        fresh = self.backend.read_telemetry(self.config.telemetry_drain_limit)
+        pose = fresh.get("pos")
+        if pose is None:
+            raise RuntimeError("PHYSICAL_POSE_STALE")
+        pose = apply_disabled_joints(
+            np.asarray(pose, dtype=np.float64),
+            self.config.disabled_joint_positions_deg,
+        )
+        self._telemetry["pos"] = pose.copy()
+        self.command_shaper.reset(pose)
+        self.command_shaper.begin_arm_blend(duration_s=duration_s)
+        return pose.copy()
+
+    def pause_trajectory(self) -> None:
+        """Freeze software trajectory at the last accepted setpoint only.
+
+        Unlike :meth:`hold_position`, this deliberately keeps the low-level
+        servo keepalive alive, so a short tracking outage holds the last pose
+        without accepting any new VR targets.
+        """
+        if self.command_shaper.is_initialized:
+            self.command_shaper.hold()
 
     def send_action(self, action: RobotAction) -> RobotAction:
         if not self.is_connected:

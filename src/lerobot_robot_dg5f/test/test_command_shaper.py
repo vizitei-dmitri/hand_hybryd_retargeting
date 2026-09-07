@@ -200,3 +200,27 @@ def test_hold_cancels_arm_blend():
 
     shaper.hold(now=0.01)
     assert not shaper.arm_blend_active
+
+
+def test_custom_resume_blend_duration_is_used():
+    shaper = make_shaper(
+        smoothing=False,
+        min_send_step_deg=0.0,
+        max_direct_step_deg=5.0,
+        startup_blend_s=0.70,
+        disabled_positions_deg={},
+    )
+    shaper.reset(np.zeros(20), now=0.0)
+    shaper.begin_arm_blend(now=0.0, duration_s=1.0)
+
+    first = shaper.step(np.full(20, 90.0), now=0.02)
+
+    assert first.command_deg[0] == pytest.approx(1.8)
+    assert shaper.arm_blend_active
+
+
+def test_negative_custom_blend_duration_is_rejected():
+    shaper = make_shaper()
+    shaper.reset(np.zeros(20), now=0.0)
+    with pytest.raises(ValueError, match="Blend duration"):
+        shaper.begin_arm_blend(now=0.0, duration_s=-1.0)

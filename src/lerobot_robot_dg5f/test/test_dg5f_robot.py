@@ -61,3 +61,27 @@ def test_mock_observation_uses_lerobot_feature_contract():
     assert diagnostics["motion_ready"] is True
     assert len(diagnostics["latest_command_deg"]) == 20
     robot.disconnect()
+
+
+def test_arm_reseed_uses_current_physical_feedback_before_blend():
+    robot = Dg5f(
+        Dg5fConfig(
+            id="test-reseed",
+            backend="mock",
+            control_smoothing=False,
+            min_send_step_deg=0.0,
+            startup_blend_s=0.70,
+        )
+    )
+    robot.connect()
+    robot.backend._positions = np.full(20, 12.0)
+    robot.backend._positions[BROKEN_PINKY_INDEX] = 0.0
+
+    pose = robot.begin_arm_blend_from_feedback(
+        max_pose_age_ms=100.0, duration_s=1.0
+    )
+
+    assert pose[0] == 12.0
+    assert robot.command_shaper.command_pose_deg[0] == 12.0
+    assert robot.command_shaper.arm_blend_active
+    robot.disconnect()

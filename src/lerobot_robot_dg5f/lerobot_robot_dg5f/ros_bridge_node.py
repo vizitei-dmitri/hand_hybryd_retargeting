@@ -18,6 +18,7 @@ from trajectory_msgs.msg import JointTrajectory
 
 from .config_dg5f import Dg5fConfig
 from .constants import BROKEN_PINKY_JOINT, JOINT_NAMES
+from .current_guard import AdaptiveCurrentGuard
 from .dg5f import Dg5f
 from .health import age_ms, disarm_reason
 
@@ -78,6 +79,26 @@ class Dg5fLeRobotBridge(Node):
         self.declare_parameter("state_rate_hz", 30.0)
         self.declare_parameter("command_timeout", 0.35)
         self.declare_parameter("tracking_timeout", 0.35)
+        # Once already ARMED, a tracking outage enters a paused grace state.
+        # The hand keeps its last accepted physical setpoint and may resume
+        # automatically if tracking returns within this window.
+        self.declare_parameter("tracking_grace_s", 15.0)
+        self.declare_parameter("tracking_resume_blend_s", 1.0)
+        self.declare_parameter("arm_pose_max_age_ms", 100.0)
+        # Empirical protection for the old DGSDK/control board. Normal runs in
+        # our logs stayed far below these thresholds; failed runs approached
+        # ~0.9 A on one joint and ~1.45 A total immediately before telemetry/
+        # Ethernet loss. The guard first slows load-increasing motion, then
+        # unloads at the hard threshold, and only disarms on a sustained trip.
+        self.declare_parameter("current_guard_enabled", True)
+        self.declare_parameter("current_guard_soft_ma", 350.0)
+        self.declare_parameter("current_guard_hard_ma", 650.0)
+        self.declare_parameter("current_guard_trip_ma", 850.0)
+        self.declare_parameter("current_guard_total_soft_ma", 800.0)
+        self.declare_parameter("current_guard_total_hard_ma", 1200.0)
+        self.declare_parameter("current_guard_total_trip_ma", 1400.0)
+        self.declare_parameter("current_guard_trip_hold_s", 0.06)
+        self.declare_parameter("current_guard_release_tau_s", 0.20)
         self.declare_parameter("control_smoothing", True)
         self.declare_parameter("max_speed_deg_s", 30.0)
         self.declare_parameter("max_accel_deg_s2", 60.0)
@@ -171,6 +192,38 @@ class Dg5fLeRobotBridge(Node):
         self._recovery_pending = False
         self._arm_pending = False
         self._arm_epoch = 0
+        self._tracking_grace_active = False
+        self._tracking_grace_started: Optional[float] = None
+        self._resume_waiting_for_fresh_command = False
+        self._current_guard = AdaptiveCurrentGuard(
+            len(JOINT_NAMES),
+            soft_ma=float(self.get_parameter("current_guard_soft_ma").value),
+            hard_ma=float(self.get_parameter("current_guard_hard_ma").value),
+            trip_ma=float(self.get_parameter("current_guard_trip_ma").value),
+            total_soft_ma=float(
+                self.get_parameter("current_guard_total_soft_ma").value
+            ),
+            total_hard_ma=float(
+                self.get_parameter("current_guard_total_hard_ma").value
+            ),
+            total_trip_ma=float(
+                self.get_parameter("current_guard_total_trip_ma").value
+            ),
+            trip_hold_s=float(
+                self.get_parameter("current_guard_trip_hold_s").value
+            ),
+            release_tau_s=float(
+                self.get_parameter("current_guard_release_tau_s").value
+            ),
+            nominal_step_deg=max(
+                1e-6, float(self.get_parameter("max_direct_step_deg").value)
+            ),
+        )
+        self._current_guard_active = False
+        self._current_guard_min_scale = 1.0
+        self._current_guard_max_current_ma = 0.0
+        self._current_guard_total_current_ma = 0.0
+        self._current_guard_limited_joints: list[str] = []
         self._workers = ThreadPoolExecutor(max_workers=1)
         self._last_warning_time = -1e9
 
@@ -244,20 +297,200 @@ class Dg5fLeRobotBridge(Node):
             self.get_logger().warning(text)
             self._last_warning_time = now
 
+    def _tracking_is_fresh(self, now: float) -> bool:
+        if not bool(self.get_parameter("require_tracking").value):
+            return True
+        return self._tracking_ok and command_is_fresh(
+            self._last_tracking_time,
+            now,
+            float(self.get_parameter("tracking_timeout").value),
+        )
+
+    def _tracking_grace_elapsed(self, now: float) -> float:
+        if self._tracking_grace_started is None:
+            return 0.0
+        return max(0.0, now - self._tracking_grace_started)
+
+    def _enter_tracking_grace(self, now: float) -> None:
+        if not self._armed or self._tracking_grace_active:
+            return
+        self._tracking_grace_active = True
+        self._tracking_grace_started = now
+        self._resume_waiting_for_fresh_command = False
+        # Freeze only the software trajectory. Do NOT suspend the low-level
+        # keepalive: during the grace window the physical hand holds the last
+        # accepted setpoint and no new VR command is forwarded.
+        self._robot.pause_trajectory()
+        grace_s = float(self.get_parameter("tracking_grace_s").value)
+        self._event("TRACKING_GRACE_STARTED", grace_s=grace_s)
+        self._warn_throttled(
+            f"Tracking lost: holding last pose for up to {grace_s:.1f} s"
+        )
+
+    def _expire_tracking_grace(self) -> None:
+        if not self._tracking_grace_active:
+            return
+        self._event("TRACKING_GRACE_EXPIRED")
+        self._disarm("TRACKING_GRACE_EXPIRED")
+
+    def _try_auto_resume(self, now: float) -> None:
+        if not (
+            self._armed
+            and self._tracking_grace_active
+            and self._resume_waiting_for_fresh_command
+            and self._tracking_is_fresh(now)
+        ):
+            return
+        grace_s = float(self.get_parameter("tracking_grace_s").value)
+        elapsed = self._tracking_grace_elapsed(now)
+        if elapsed > grace_s:
+            self._expire_tracking_grace()
+            return
+        if not command_is_fresh(
+            self._last_command_time,
+            now,
+            float(self.get_parameter("command_timeout").value),
+        ):
+            return
+
+        # Re-anchor exactly once to current physical feedback. This prevents a
+        # stale pre-loss command from becoming the origin of the catch-up.
+        self._robot.prepare_arm()
+        pose = self._robot.begin_arm_blend_from_feedback(
+            max_pose_age_ms=float(self.get_parameter("arm_pose_max_age_ms").value),
+            duration_s=float(self.get_parameter("tracking_resume_blend_s").value),
+        )
+        target_offset = float(np.max(np.abs(self._latest_command_deg - pose)))
+        self._tracking_grace_active = False
+        self._tracking_grace_started = None
+        self._resume_waiting_for_fresh_command = False
+        self._disarm_reason = "NONE"
+        self._event(
+            "TRACKING_AUTO_RESUME_STARTED",
+            grace_elapsed_s=elapsed,
+            max_target_offset_deg=target_offset,
+        )
+        self.get_logger().warning(
+            "Tracking restored: automatically blending from current physical "
+            f"pose to live VR target over "
+            f"{float(self.get_parameter('tracking_resume_blend_s').value):.2f} s"
+        )
+
+    def _guard_current_target(
+        self, desired_deg: np.ndarray, now: float
+    ) -> Optional[np.ndarray]:
+        """Return a current-limited target, or ``None`` after emergency disarm.
+
+        The normal target is bit-for-bit unchanged while current stays below
+        the soft thresholds. Only motion that would increase an already-loaded
+        position error is slowed; a target that moves back toward the measured
+        pose is allowed through so the operator can always relieve contact.
+        """
+        if not bool(self.get_parameter("current_guard_enabled").value):
+            self._current_guard_active = False
+            self._current_guard_min_scale = 1.0
+            self._current_guard_limited_joints = []
+            return np.asarray(desired_deg, dtype=np.float64).copy()
+
+        status = self._robot.get_diagnostics()
+        current = np.asarray(
+            status.get("measured_current", status.get("raw_current", [])),
+            dtype=np.float64,
+        )
+        measured = np.asarray(status.get("measured_pos", []), dtype=np.float64)
+        if current.shape != (len(JOINT_NAMES),) or measured.shape != (
+            len(JOINT_NAMES),
+        ):
+            # Hardware-health watchdog remains authoritative if telemetry is
+            # actually missing. Do not fabricate load information here.
+            return np.asarray(desired_deg, dtype=np.float64).copy()
+
+        effective = self._robot.command_shaper.effective_command()
+        decision = self._current_guard.update(
+            current_ma=current,
+            measured_deg=measured,
+            effective_deg=effective,
+            desired_deg=np.asarray(desired_deg, dtype=np.float64),
+            now=now,
+        )
+        self._current_guard_min_scale = decision.min_scale
+        self._current_guard_max_current_ma = decision.max_current_ma
+        self._current_guard_total_current_ma = decision.total_current_ma
+        self._current_guard_limited_joints = [
+            JOINT_NAMES[index]
+            for index, limited in enumerate(decision.limited_mask)
+            if limited
+        ]
+
+        if decision.active and not self._current_guard_active:
+            self._event(
+                "CURRENT_GUARD_ACTIVE",
+                max_current_ma=decision.max_current_ma,
+                total_current_ma=decision.total_current_ma,
+                min_scale=decision.min_scale,
+                limited_joints=self._current_guard_limited_joints,
+            )
+            self._warn_throttled(
+                "Current guard limiting load-increasing motion: "
+                f"Imax={decision.max_current_ma:.0f} mA, "
+                f"Itotal={decision.total_current_ma:.0f} mA"
+            )
+        elif not decision.active and self._current_guard_active:
+            self._event("CURRENT_GUARD_RELEASED")
+        self._current_guard_active = decision.active
+
+        if decision.trip:
+            self._event(
+                "CURRENT_GUARD_TRIP",
+                max_current_ma=decision.max_current_ma,
+                total_current_ma=decision.total_current_ma,
+                duration_s=decision.trip_duration_s,
+            )
+            self._disarm("OVERCURRENT_GUARD")
+            self.get_logger().error(
+                "OVERCURRENT_GUARD: sustained high motor current; output disarmed "
+                f"(Imax={decision.max_current_ma:.0f} mA, "
+                f"Itotal={decision.total_current_ma:.0f} mA)"
+            )
+            return None
+        return decision.target_deg
+
     def _on_command(self, message: JointTrajectory) -> None:
         try:
             self._latest_command_deg = trajectory_to_degrees(message)
-            self._last_command_time = self._now_seconds()
+            now = self._now_seconds()
+            self._last_command_time = now
+            if self._resume_waiting_for_fresh_command:
+                try:
+                    self._try_auto_resume(now)
+                except Exception as error:
+                    self._warn_throttled(f"Auto-resume waiting for safe pose: {error}")
         except ValueError as error:
             self._warn_throttled(f"Ignoring unsafe DG5F command: {error}")
 
     def _on_tracking(self, message: Bool) -> None:
-        self._last_tracking_time = self._now_seconds()
+        now = self._now_seconds()
+        self._last_tracking_time = now
         self._tracking_ok = bool(message.data)
-        if not self._tracking_ok and not self._arm_pending:
-            self._robot.hold_position()
-        if not self._tracking_ok and self._backend_name == "tesollo":
-            self._disarm("TRACKING_TIMEOUT")
+
+        if not self._armed:
+            return
+        if not self._tracking_ok:
+            self._resume_waiting_for_fresh_command = False
+            self._enter_tracking_grace(now)
+            return
+
+        if self._tracking_grace_active:
+            grace_s = float(self.get_parameter("tracking_grace_s").value)
+            if self._tracking_grace_elapsed(now) > grace_s:
+                self._expire_tracking_grace()
+                return
+            # Grace may have started either from an explicit tracking=false or
+            # because the tracking topic itself went stale. Require a command
+            # generated after a fresh tracking message returns in both cases.
+            if not self._resume_waiting_for_fresh_command:
+                self._resume_waiting_for_fresh_command = True
+                self._event("TRACKING_RESTORED_WAITING_FRESH_COMMAND")
 
     def _event(self, name, **details):
         self._events_pub.publish(String(data=json.dumps({
@@ -265,8 +498,12 @@ class Dg5fLeRobotBridge(Node):
         })))
 
     def _disarm(self, reason):
-        if self._armed:
-            self._armed = False
+        was_armed = self._armed
+        self._armed = False
+        self._tracking_grace_active = False
+        self._tracking_grace_started = None
+        self._resume_waiting_for_fresh_command = False
+        if was_armed:
             self._disarm_reason = reason
             self._robot.hold_position()
             self._event("DISARMED", reason=reason)
@@ -319,7 +556,7 @@ class Dg5fLeRobotBridge(Node):
                 raise RuntimeError("COMMAND_TIMEOUT")
 
             # PASSIVE ONLY: prepare_arm reads status and validates it. It may
-            # not reconnect/restart/reseed/send any hardware command.
+            # not reconnect/restart or send any hardware command.
             self._robot.prepare_arm()
 
             failure = self._input_failure()
@@ -330,13 +567,25 @@ class Dg5fLeRobotBridge(Node):
             if failure != "NONE":
                 raise RuntimeError(failure)
 
-            # Software-only safety transition: begin from the last accepted
-            # physical setpoint and blend toward the current VR target.  This
-            # does not call DGSDK or send any command while ARM is still false.
-            self._robot.begin_arm_blend()
+            # Re-anchor the shaper ONCE from the freshest physical pose. This
+            # prevents a stale pre-arm command_pose from producing a large
+            # first setpoint. No hardware command is sent until ARMED becomes
+            # true and the normal 50 Hz timer advances the blend.
+            pose = self._robot.begin_arm_blend_from_feedback(
+                max_pose_age_ms=float(self.get_parameter("arm_pose_max_age_ms").value),
+                duration_s=float(self.get_parameter("startup_blend_s").value),
+            )
+            target_offset = float(np.max(np.abs(self._latest_command_deg - pose)))
+            self._tracking_grace_active = False
+            self._tracking_grace_started = None
+            self._resume_waiting_for_fresh_command = False
+            self._current_guard.reset(self._now_seconds())
+            self._current_guard_active = False
+            self._current_guard_min_scale = 1.0
+            self._current_guard_limited_joints = []
             self._disarm_reason = "NONE"
             self._armed = True
-            self._event("ARMED")
+            self._event("ARMED", max_target_offset_deg=target_offset)
             response.success, response.message = True, "DG5F output enabled (passive preflight OK)"
         except Exception as error:
             self._armed = False
@@ -393,6 +642,8 @@ class Dg5fLeRobotBridge(Node):
                 raise RuntimeError(str(status.get("motion_ready_reason", "SDK_NOT_MOTION_READY")))
 
             self._recovery_state = "SUCCEEDED"
+            self._current_guard.reset(self._now_seconds())
+            self._current_guard_active = False
             self._disarm_reason = "RECOVERY_REQUIRED_ARM"
             self._event("RECOVERY_SUCCEEDED")
             response.success = True
@@ -416,16 +667,33 @@ class Dg5fLeRobotBridge(Node):
     def _send_latest(self) -> None:
         if not self._armed or self._latest_command_deg is None:
             return
+        now = self._now_seconds()
+
+        if bool(self.get_parameter("require_tracking").value):
+            if not self._tracking_is_fresh(now):
+                self._enter_tracking_grace(now)
+            if self._tracking_grace_active:
+                if self._tracking_grace_elapsed(now) > float(
+                    self.get_parameter("tracking_grace_s").value
+                ):
+                    self._expire_tracking_grace()
+                # During grace, or while waiting for the first post-restore
+                # target, send absolutely no new motion command. Low-level
+                # keepalive continues holding the last accepted pose.
+                return
+
         failure = self._input_failure()
         if failure:
             self._disarm(failure)
             self._warn_throttled(f"{failure}: LeRobot output was disarmed")
             return
-        if bool(self.get_parameter("require_tracking").value) and not self._tracking_ok:
+
+        guarded_target = self._guard_current_target(self._latest_command_deg, now)
+        if guarded_target is None:
             return
 
         action = {
-            f"{joint}.pos": float(self._latest_command_deg[index])
+            f"{joint}.pos": float(guarded_target[index])
             for index, joint in enumerate(JOINT_NAMES)
         }
         try:
@@ -556,7 +824,37 @@ class Dg5fLeRobotBridge(Node):
         snapshot["recovery_state"] = self._recovery_state
         snapshot["recovery_pending"] = self._recovery_pending
         snapshot["last_command_age_ms"] = age_ms(self._last_command_time, self._now_seconds())
-        snapshot["last_tracking_age_ms"] = age_ms(self._last_tracking_time, self._now_seconds())
+        now = self._now_seconds()
+        snapshot["last_tracking_age_ms"] = age_ms(self._last_tracking_time, now)
+        snapshot["tracking_grace_active"] = self._tracking_grace_active
+        snapshot["tracking_grace_s"] = self.get_parameter("tracking_grace_s").value
+        snapshot["tracking_grace_elapsed_s"] = (
+            self._tracking_grace_elapsed(now) if self._tracking_grace_active else 0.0
+        )
+        snapshot["tracking_resume_pending"] = self._resume_waiting_for_fresh_command
+        snapshot["tracking_resume_blend_s"] = self.get_parameter(
+            "tracking_resume_blend_s"
+        ).value
+        snapshot["arm_pose_max_age_ms"] = self.get_parameter("arm_pose_max_age_ms").value
+        snapshot["current_guard_enabled"] = self.get_parameter(
+            "current_guard_enabled"
+        ).value
+        snapshot["current_guard_active"] = self._current_guard_active
+        snapshot["current_guard_min_scale"] = self._current_guard_min_scale
+        snapshot["current_guard_max_current_ma"] = self._current_guard_max_current_ma
+        snapshot["current_guard_total_current_ma"] = self._current_guard_total_current_ma
+        snapshot["current_guard_limited_joints"] = self._current_guard_limited_joints
+        for name in (
+            "current_guard_soft_ma",
+            "current_guard_hard_ma",
+            "current_guard_trip_ma",
+            "current_guard_total_soft_ma",
+            "current_guard_total_hard_ma",
+            "current_guard_total_trip_ma",
+            "current_guard_trip_hold_s",
+            "current_guard_release_tau_s",
+        ):
+            snapshot[name] = self.get_parameter(name).value
         snapshot["backend"] = self._backend_name
         snapshot["control_smoothing"] = self.get_parameter("control_smoothing").value
         snapshot["command_profile"] = "smoothed" if snapshot["control_smoothing"] else "direct_guarded"
