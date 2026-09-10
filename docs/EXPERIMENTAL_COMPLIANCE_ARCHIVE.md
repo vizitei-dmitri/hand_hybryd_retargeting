@@ -17,9 +17,14 @@ actuator/contact relief, adjacent proximity, sustained stall, post-shaper clamp,
 Сравнение без переключения рабочей ветки:
 
 ```bash
-git diff feature/lerobot-dataset-recorder..archive/adaptive-compliance-2026-09-10 -- \
+git diff baseline/current-guard-v2-2026-09-08..archive/adaptive-compliance-2026-09-10 -- \
   src/lerobot_robot_dg5f
 git show f3ef50ad548257deffe103405a7b4f6492684620
 ```
 
 Архив не отправлен в remote.
+
+Baseline восстановлен из ZIP + current_guard_v2.patch и зафиксирован тегом
+`baseline/current-guard-v2-2026-09-08`; [происхождение и сравнение](CURRENT_GUARD_V2_BASELINE.md).
+В рабочей версии алгоритм эксперимента дополнительно сохранён в
+`src/lerobot_robot_dg5f/lerobot_robot_dg5f/experimental_current_guard.py`.

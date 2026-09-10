@@ -46,6 +46,8 @@ tracking, с шагом до 5° и токовым ограничением дв
 contact/FK остаются только в диагностике. ARM blend и tracking grace/resume сохранены.
 Точные параметры и границы отката:
 [docs/CURRENT_GUARD_V2_BASELINE.md](docs/CURRENT_GUARD_V2_BASELINE.md).
+Reference восстановлен из ZIP + `dg5f_current_guard_v2.patch` для запуска
+08.09 12:49 и закреплён тегом `baseline/current-guard-v2-2026-09-08`.
 
 ## Неисправный сустав мизинца
 

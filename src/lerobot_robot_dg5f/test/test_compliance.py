@@ -8,7 +8,7 @@ import pytest
 from lerobot_robot_dg5f.command_shaper import PositionCommandShaper
 from lerobot_robot_dg5f.constants import JOINT_NAMES, LOWER_LIMITS_DEG, UPPER_LIMITS_DEG
 from lerobot_robot_dg5f.contact_kinematics import ContactKinematics
-from lerobot_robot_dg5f.current_guard import AdaptiveCurrentGuard, ComplianceConfig
+from lerobot_robot_dg5f.experimental_current_guard import AdaptiveCurrentGuard, ComplianceConfig
 
 
 def make_guard(**config):

@@ -24,7 +24,7 @@ from trajectory_msgs.msg import JointTrajectory
 
 from .constants import JOINT_NAMES, TESOLLO_TEMPERATURE_LIMIT_C
 from .debug_recording import DebugRunWriter, NETWORK_FIELDS, CONTACT_ARRAY_FIELDS
-from .current_guard import ComplianceConfig
+from .experimental_current_guard import ComplianceConfig
 
 
 TOPICS = {

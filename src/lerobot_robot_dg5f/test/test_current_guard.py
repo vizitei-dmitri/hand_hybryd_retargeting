@@ -149,3 +149,25 @@ def test_total_trip_uses_more_conservative_envelope():
     assert not guard.update(now=2.00, **args).trip
     assert not guard.update(now=2.02, **args).trip
     assert guard.update(now=2.05, **args).trip
+
+
+def test_reference_hard_relief_uses_final_error_not_initial_direction():
+    guard = make_guard()
+    current = np.zeros(20)
+    current[6] = 700
+    args = dict(current_ma=current, measured_deg=np.full(20, 59.0),
+                effective_deg=np.full(20, 65.0))
+    crossing = guard.update(desired_deg=np.full(20, 20.0), now=1.0, **args)
+    assert crossing.target_deg[6] == 65  # final error 39 > current error 6
+    relief = guard.update(desired_deg=np.full(20, 60.0), now=1.02, **args)
+    assert relief.target_deg[6] == 60  # final error 1 < current error 6
+
+
+def test_reference_trip_timer_is_not_reset_by_control_gap():
+    guard = make_guard()
+    current = np.zeros(20)
+    current[6] = 900
+    args = dict(current_ma=current, measured_deg=np.zeros(20),
+                effective_deg=np.full(20, 10.0), desired_deg=np.full(20, 30.0))
+    assert not guard.update(now=1.0, **args).trip
+    assert guard.update(now=1.25, **args).trip

@@ -18,7 +18,9 @@ from trajectory_msgs.msg import JointTrajectory
 
 from .config_dg5f import Dg5fConfig
 from .constants import BROKEN_PINKY_JOINT, JOINT_NAMES
-from .current_guard import AdaptiveCurrentGuard, ComplianceConfig
+from .current_guard import AdaptiveCurrentGuard
+from .experimental_current_guard import ComplianceConfig
+from .current_guard_diagnostics import CurrentTrendDiagnostics, guard_snapshot
 from .contact_kinematics import ContactKinematics
 from dg5f_teleop.contact_signals import decode_contact_packet, PAIR_NAMES, FINGERS
 from .dg5f import Dg5f
@@ -107,13 +109,13 @@ class Dg5fLeRobotBridge(Node):
         self.declare_parameter("compliance_urdf_path", "/workspace/models/dg5f/urdf/dg5f_right.urdf")
         self.declare_parameter("hybrid_contact_topic", "/dg5f/hybrid_contact")
         self.declare_parameter("safety_proximity_topic", "/dg5f/safety_proximity")
-        self.declare_parameter("control_smoothing", False)
+        self.declare_parameter("control_smoothing", True)
         self.declare_parameter("max_speed_deg_s", 30.0)
         self.declare_parameter("max_accel_deg_s2", 60.0)
         self.declare_parameter("response_time_s", 0.15)
         self.declare_parameter("filter_tau_s", 0.05)
         self.declare_parameter("target_deadband_deg", 0.20)
-        self.declare_parameter("min_send_step_deg", 0.0)
+        self.declare_parameter("min_send_step_deg", 0.20)
         self.declare_parameter("max_direct_step_deg", 5.0)
         self.declare_parameter("startup_blend_s", 0.70)
         self.declare_parameter("max_dt_s", 0.05)
@@ -221,6 +223,7 @@ class Dg5fLeRobotBridge(Node):
         self._compliance_active = False
         self._load_event_latches = {}
         self._compliance_diagnostics = {}
+        self._current_trend_diagnostics = CurrentTrendDiagnostics(len(JOINT_NAMES))
         self._last_compliance_time = None
         self._current_guard = AdaptiveCurrentGuard(
             len(JOINT_NAMES),
@@ -245,7 +248,6 @@ class Dg5fLeRobotBridge(Node):
             nominal_step_deg=max(
                 1e-6, float(self.get_parameter("max_direct_step_deg").value)
             ),
-            compliance=None,  # current_guard_v2 only: no slope/contact/lead/yield/stall scaling
         )
         self._current_guard_active = False
         self._current_guard_min_scale = 1.0
@@ -487,7 +489,9 @@ class Dg5fLeRobotBridge(Node):
             now=now,
         )
         self._last_compliance_time = now
-        self._compliance_diagnostics = decision.diagnostics
+        self._compliance_diagnostics = guard_snapshot(
+            self._current_guard, decision, effective, desired_deg,
+        )
         self._current_guard_min_scale = decision.min_scale
         self._current_guard_max_current_ma = decision.max_current_ma
         self._current_guard_total_current_ma = decision.total_current_ma
@@ -977,6 +981,9 @@ class Dg5fLeRobotBridge(Node):
                         compliance_stall_enabled=False, contact_control_enabled=False,
                         motion_control_mode="direct_guarded+current_guard_v2")
         try:
+            snapshot.update(self._current_trend_diagnostics.observe(
+                values.get("measured_current", values.get("raw_current", [])), now,
+            ))
             observed = self._contact_for_diagnostics(
                 self._robot.command_shaper.effective_command(), now,
                 measured=values.get("measured_pos"), desired=self._latest_command_deg,

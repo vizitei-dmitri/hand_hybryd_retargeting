@@ -15,6 +15,7 @@ from lerobot_robot_dg5f.backends import MockDg5fBackend, TesolloDg5fBackend
 from lerobot_robot_dg5f.health import disarm_reason
 from lerobot_robot_dg5f.ros_bridge_node import Dg5fLeRobotBridge
 from lerobot_robot_dg5f.constants import JOINT_NAMES
+from lerobot_robot_dg5f.current_guard import AdaptiveCurrentGuard
 
 
 class RecoveryBackend(MockDg5fBackend):
@@ -137,7 +138,8 @@ def prepare_mock_load(node, monkeypatch, current_ma, measured_deg):
 def test_guarded_effective_not_vr_is_published_for_dataset(bridge, monkeypatch):
     node, _ = bridge
     status = prepare_mock_load(node, monkeypatch, current_ma=30, measured_deg=59)
-    assert node._current_guard.compliance is None
+    assert type(node._current_guard) is AdaptiveCurrentGuard
+    contact_observer = node._contact_for_diagnostics
 
     def forbid_contact_in_control(*args, **kwargs):
         raise AssertionError("Contact/FK must only be evaluated by diagnostics")
@@ -158,8 +160,29 @@ def test_guarded_effective_not_vr_is_published_for_dataset(bridge, monkeypatch):
     node._latest_command_deg[6] = 20  # operator relief, beyond measured
     node._last_tracking_time = node._last_command_time = time.monotonic()
     node._send_latest()
+    # Exact reference: a target far past measured increases absolute error,
+    # so hard current still freezes it. Only a smaller final error is relief.
+    assert np.rad2deg(messages[-1].position[6]) == pytest.approx(65)
+    node._latest_command_deg[6] = 60  # measured=59, effective=65: 6 -> 1 deg error
+    node._last_tracking_time = node._last_command_time = time.monotonic()
+    node._send_latest()
     assert np.rad2deg(messages[-1].position[6]) == pytest.approx(60)
     assert node._compliance_diagnostics["joint_tracking_scale"][6] == 1
+
+    # Actual FK/status publication must leave the command and guard untouched.
+    monkeypatch.setattr(node, "_contact_for_diagnostics", contact_observer)
+    diagnostics = []
+    monkeypatch.setattr(node, "_diagnostics_pub", SimpleNamespace(publish=diagnostics.append))
+    before = node._robot.command_shaper.effective_command()
+    last_guard_time = node._current_guard._last_time
+    node._publish_diagnostics(status)
+    fields = {kv.key: kv.value for kv in diagnostics[-1].status[0].values}
+    assert fields["contact_signal_valid"] == "true"
+    assert fields["compliance_enabled"] == "false"
+    assert "robot_effective_pair_distances_mm" in fields
+    np.testing.assert_array_equal(node._robot.command_shaper.effective_command(), before)
+    assert node._current_guard._last_time == last_guard_time
+    assert node._armed
 
 
 @pytest.mark.parametrize("current,event,reason,frames", [

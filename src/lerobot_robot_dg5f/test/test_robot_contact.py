@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from std_msgs.msg import String
 
-from lerobot_robot_dg5f.current_guard import AdaptiveCurrentGuard, ComplianceConfig
+from lerobot_robot_dg5f.experimental_current_guard import AdaptiveCurrentGuard, ComplianceConfig
 from lerobot_robot_dg5f.contact_kinematics import ContactKinematics
 from lerobot_robot_dg5f.debug_recording import DebugRunWriter
 from lerobot_robot_dg5f.debug_recorder import Dg5fDebugRecorder

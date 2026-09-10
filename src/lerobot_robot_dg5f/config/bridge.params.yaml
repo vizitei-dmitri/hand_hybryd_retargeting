@@ -40,7 +40,9 @@ dg5f_lerobot_bridge:
     current_guard_trip_hold_s: 0.04
     # Restriction attacks immediately but releases over 0.2 s to avoid chatter.
     current_guard_release_tau_s: 0.20
-    # ROLLBACK: direct_guarded + current_guard_v2. Contact/FK are DEBUG ONLY.
+    # Reference: hand_hybryd_retargeting_3.zip + dg5f_current_guard_v2.patch.
+    # Baseline 2026-09-08 12:49: direct_guarded + current_guard_v2.
+    # Contact/FK are DEBUG ONLY.
     # All experimental trajectory parameters below are inert in the ROS bridge;
     # neither setting enabled=true nor contact packets can rewire control.
     compliance_enabled: false
