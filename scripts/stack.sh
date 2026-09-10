@@ -59,6 +59,16 @@ Commands:
   debug-record-network
                  ROS recorder + host ping, tcpdump and link counters
   dg-status      Read current ROS diagnostics; no SDK connection
+  dataset-record REPO_ID "TASK" [--fps 30] [--cameras YAML] [--resume]
+                 Passive local LeRobotDataset recorder; never connects to DGSDK
+  dataset-start  Start an episode after fresh ROS data and ARM are available
+  dataset-finish Save and seal the current episode
+  dataset-discard Discard only the active unsaved episode
+  dataset-status Show recording state and freshness/preflight information
+  dataset-check DATASET [--json]
+                 Reopen and validate a local dataset (directory or repo-id)
+  dataset-mock [--repo-id NAME] [--with-camera] [--interrupt-active]
+                 End-to-end dataset test with synthetic ROS data in domain 93
   shell          Open a shell in the container
   logs           Show container logs
   stop           Stop only this project's container
@@ -298,6 +308,40 @@ case "${1:-help}" in
     require_container
     "${compose[@]}" exec "${service}" bash -lc \
       "${source_workspace}; timeout 8s ros2 topic echo /dg5f/lerobot/diagnostics --once"
+    ;;
+  dataset-record)
+    require_container
+    if (( $# < 3 )); then
+      echo 'Usage: bash scripts/stack.sh dataset-record REPO_ID "TASK" [options]' >&2
+      exit 2
+    fi
+    # Pass user text as argv, never interpolate task/root/YAML into shell code.
+    "${compose[@]}" exec -e HF_HUB_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 "${service}" bash -lc \
+      "${source_workspace}; exec ros2 run lerobot_robot_dg5f dataset_recorder \"\$@\"" \
+      dataset-record --repo-id "$2" --task "$3" "${@:4}"
+    ;;
+  dataset-start|dataset-finish|dataset-discard|dataset-status)
+    require_container
+    case "$1" in
+      dataset-start) dataset_service=start_episode ;;
+      dataset-finish) dataset_service=finish_episode ;;
+      dataset-discard) dataset_service=discard_episode ;;
+      dataset-status) dataset_service=status ;;
+    esac
+    "${compose[@]}" exec "${service}" bash -lc \
+      "${source_workspace}; timeout 60s ros2 service call /dg5f_dataset/${dataset_service} std_srvs/srv/Trigger '{}'"
+    ;;
+  dataset-check)
+    require_container
+    "${compose[@]}" exec -T -e HF_HUB_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 "${service}" bash -lc \
+      "${source_workspace}; exec ros2 run lerobot_robot_dg5f dataset_check \"\$@\"" \
+      dataset-check "${@:2}"
+    ;;
+  dataset-mock)
+    require_container
+    "${compose[@]}" exec -T "${service}" bash -lc \
+      "${source_workspace}; exec python3 /workspace/scripts/dataset_mock_inside.py \"\$@\"" \
+      dataset-mock "${@:2}"
     ;;
   debug-mark)
     require_container

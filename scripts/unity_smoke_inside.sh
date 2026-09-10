@@ -34,6 +34,7 @@ cleanup() {
 trap cleanup EXIT
 
 setsid ros2 launch dg5f_unity_teleop unity_dg5f.launch.py \
+  lerobot_backend:=mock \
   mujoco_viewer:=false \
   tcp_port:="${smoke_port}" \
   >"${log_file}" 2>&1 &
@@ -72,6 +73,7 @@ python3 /workspace/scripts/validate_smoke.py
 wait "${client_pid}"
 client_pid=""
 sleep 0.6
+python3 /workspace/scripts/validate_smoke.py --expect-tracking-grace
 python3 /workspace/scripts/validate_smoke.py --expect-disarmed
 
 echo "LeRobot smoke passed: TCP/CDR -> Mano[21] -> Hybrid -> fault map -> MuJoCo + LeRobot."

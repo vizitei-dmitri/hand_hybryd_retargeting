@@ -12,13 +12,15 @@ from rclpy.node import Node
 from rclpy.task import Future
 from rclpy.callback_groups import ReentrantCallbackGroup
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Float32MultiArray, String
+from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray, String
 from std_srvs.srv import SetBool, Trigger
 from trajectory_msgs.msg import JointTrajectory
 
 from .config_dg5f import Dg5fConfig
 from .constants import BROKEN_PINKY_JOINT, JOINT_NAMES
-from .current_guard import AdaptiveCurrentGuard
+from .current_guard import AdaptiveCurrentGuard, ComplianceConfig
+from .contact_kinematics import ContactKinematics
+from dg5f_teleop.contact_signals import decode_contact_packet, PAIR_NAMES, FINGERS
 from .dg5f import Dg5f
 from .health import age_ms, disarm_reason
 
@@ -89,23 +91,29 @@ class Dg5fLeRobotBridge(Node):
         # our logs stayed far below these thresholds; failed runs approached
         # ~0.9 A on one joint and ~1.45 A total immediately before telemetry/
         # Ethernet loss. The guard first slows load-increasing motion, then
-        # unloads at the hard threshold, and only disarms on a sustained trip.
+        # freezes further loading at hard, and disarms on a sustained trip.
         self.declare_parameter("current_guard_enabled", True)
         self.declare_parameter("current_guard_soft_ma", 350.0)
         self.declare_parameter("current_guard_hard_ma", 650.0)
         self.declare_parameter("current_guard_trip_ma", 850.0)
-        self.declare_parameter("current_guard_total_soft_ma", 800.0)
-        self.declare_parameter("current_guard_total_hard_ma", 1200.0)
-        self.declare_parameter("current_guard_total_trip_ma", 1400.0)
-        self.declare_parameter("current_guard_trip_hold_s", 0.06)
+        self.declare_parameter("current_guard_total_soft_ma", 600.0)
+        self.declare_parameter("current_guard_total_hard_ma", 850.0)
+        self.declare_parameter("current_guard_total_trip_ma", 1050.0)
+        self.declare_parameter("current_guard_trip_hold_s", 0.04)
         self.declare_parameter("current_guard_release_tau_s", 0.20)
-        self.declare_parameter("control_smoothing", True)
+        for name, value in vars(ComplianceConfig()).items():
+            self.declare_parameter(f"compliance_{name}", False if name.endswith("enabled") else value)
+        self.declare_parameter("compliance_contact_timeout_s", 0.15)
+        self.declare_parameter("compliance_urdf_path", "/workspace/models/dg5f/urdf/dg5f_right.urdf")
+        self.declare_parameter("hybrid_contact_topic", "/dg5f/hybrid_contact")
+        self.declare_parameter("safety_proximity_topic", "/dg5f/safety_proximity")
+        self.declare_parameter("control_smoothing", False)
         self.declare_parameter("max_speed_deg_s", 30.0)
         self.declare_parameter("max_accel_deg_s2", 60.0)
         self.declare_parameter("response_time_s", 0.15)
         self.declare_parameter("filter_tau_s", 0.05)
         self.declare_parameter("target_deadband_deg", 0.20)
-        self.declare_parameter("min_send_step_deg", 0.20)
+        self.declare_parameter("min_send_step_deg", 0.0)
         self.declare_parameter("max_direct_step_deg", 5.0)
         self.declare_parameter("startup_blend_s", 0.70)
         self.declare_parameter("max_dt_s", 0.05)
@@ -195,6 +203,25 @@ class Dg5fLeRobotBridge(Node):
         self._tracking_grace_active = False
         self._tracking_grace_started: Optional[float] = None
         self._resume_waiting_for_fresh_command = False
+        # Baseline rollback: experimental parameters are retained for old
+        # configs/debug archives, but are NOT wired into physical control.
+        if bool(self.get_parameter("compliance_enabled").value):
+            self.get_logger().warning("Experimental compliance is disconnected; using current_guard_v2")
+        contact_timeout = float(self.get_parameter("compliance_contact_timeout_s").value)
+        if not np.isfinite(contact_timeout) or contact_timeout <= 0:
+            raise ValueError("compliance_contact_timeout_s must be finite and positive")
+        self._contact_kinematics = None
+        self._contact_kinematics_error = ""
+        try:
+            self._contact_kinematics = ContactKinematics(str(self.get_parameter("compliance_urdf_path").value))
+        except Exception as error:
+            self._contact_kinematics_error = str(error)
+            self.get_logger().warning(f"Diagnostic FK unavailable; motion control unaffected: {error}")
+        self._contact_samples = {}
+        self._compliance_active = False
+        self._load_event_latches = {}
+        self._compliance_diagnostics = {}
+        self._last_compliance_time = None
         self._current_guard = AdaptiveCurrentGuard(
             len(JOINT_NAMES),
             soft_ma=float(self.get_parameter("current_guard_soft_ma").value),
@@ -218,6 +245,7 @@ class Dg5fLeRobotBridge(Node):
             nominal_step_deg=max(
                 1e-6, float(self.get_parameter("max_direct_step_deg").value)
             ),
+            compliance=None,  # current_guard_v2 only: no slope/contact/lead/yield/stall scaling
         )
         self._current_guard_active = False
         self._current_guard_min_scale = 1.0
@@ -262,6 +290,10 @@ class Dg5fLeRobotBridge(Node):
             self._on_tracking,
             1,
         )
+        self.create_subscription(Float64MultiArray, str(self.get_parameter("hybrid_contact_topic").value),
+                                 lambda msg: self._on_contact(msg, hybrid=True), 1)
+        self.create_subscription(Float64MultiArray, str(self.get_parameter("safety_proximity_topic").value),
+                                 lambda msg: self._on_contact(msg, hybrid=False), 1)
         self._service_group = ReentrantCallbackGroup()
         self._enable_service = self.create_service(
             SetBool,
@@ -376,20 +408,61 @@ class Dg5fLeRobotBridge(Node):
             f"{float(self.get_parameter('tracking_resume_blend_s').value):.2f} s"
         )
 
+    def _on_contact(self, message, *, hybrid):
+        key = "hybrid" if hybrid else "proximity"
+        try:
+            packet = decode_contact_packet(message.data, hybrid=hybrid)
+            source_age = self.get_clock().now().nanoseconds * 1e-9 - packet[0]
+            timeout = float(self.get_parameter("compliance_contact_timeout_s").value)
+            if not -0.05 <= source_age <= timeout:
+                raise ValueError("stale/future contact timestamp")
+            previous = self._contact_samples.get(key)
+            if previous is not None and packet[0] <= previous[0][0]:
+                return  # Replays/repeated stamps must never refresh freshness.
+            self._contact_samples[key] = (packet, self._now_seconds() - max(0, source_age))
+        except (ValueError, TypeError) as error:
+            self._contact_samples.pop(key, None)
+            self._warn_throttled(f"Contact signal rejected; current guard remains active: {error}")
+
+    def _contact_for_diagnostics(self, effective, now, *, measured=None, desired=None):
+        """Read-only observer, called by diagnostics, never by _send_latest/guard."""
+        timeout = float(self.get_parameter("compliance_contact_timeout_s").value)
+        fresh = {name: packet for name, (packet, at) in self._contact_samples.items()
+                 if 0 <= now - at <= timeout}
+        proximity = fresh.get("proximity")
+        hybrid = fresh.get("hybrid")
+        result = {}
+        if hybrid is not None:
+            result["hybrid_weights"] = hybrid[1:6]
+        if proximity is not None:
+            result.update(pair_distances_m=proximity[1:], contact_stamp_s=float(proximity[0]))
+        if self._contact_kinematics is None or measured is None or desired is None:
+            return result
+        try:
+            result.update(
+                robot_pair_distances_m=np.stack([
+                    self._contact_kinematics.pair_distances(measured),
+                    self._contact_kinematics.pair_distances(effective),
+                    self._contact_kinematics.pair_distances(desired),
+                ]),
+            )
+        except Exception as error:
+            self._warn_throttled(f"Diagnostic geometry unavailable; motion unaffected: {error}")
+        return result
+
     def _guard_current_target(
         self, desired_deg: np.ndarray, now: float
     ) -> Optional[np.ndarray]:
         """Return a current-limited target, or ``None`` after emergency disarm.
 
-        The normal target is bit-for-bit unchanged while current stays below
-        the soft thresholds. Only motion that would increase an already-loaded
-        position error is slowed; a target that moves back toward the measured
-        pose is allowed through so the operator can always relieve contact.
+        Current guard v2 only. Contact/FK/slope/yield do not enter this path.
+        Relief bypasses current limiting, not the shaper/emergency trip.
         """
         if not bool(self.get_parameter("current_guard_enabled").value):
             self._current_guard_active = False
             self._current_guard_min_scale = 1.0
             self._current_guard_limited_joints = []
+            self._compliance_diagnostics = {"compliance_enabled": False, "compliance_active": False}
             return np.asarray(desired_deg, dtype=np.float64).copy()
 
         status = self._robot.get_diagnostics()
@@ -413,6 +486,8 @@ class Dg5fLeRobotBridge(Node):
             desired_deg=np.asarray(desired_deg, dtype=np.float64),
             now=now,
         )
+        self._last_compliance_time = now
+        self._compliance_diagnostics = decision.diagnostics
         self._current_guard_min_scale = decision.min_scale
         self._current_guard_max_current_ma = decision.max_current_ma
         self._current_guard_total_current_ma = decision.total_current_ma
@@ -421,34 +496,34 @@ class Dg5fLeRobotBridge(Node):
             for index, limited in enumerate(decision.limited_mask)
             if limited
         ]
-
+        self._load_event_transition(
+            "CURRENT_GUARD", decision.active, now,
+            max_current_ma=decision.max_current_ma,
+            total_current_ma=decision.total_current_ma,
+            min_scale=decision.min_scale,
+            limited_joints=self._current_guard_limited_joints,
+        )
         if decision.active and not self._current_guard_active:
-            self._event(
-                "CURRENT_GUARD_ACTIVE",
-                max_current_ma=decision.max_current_ma,
-                total_current_ma=decision.total_current_ma,
-                min_scale=decision.min_scale,
-                limited_joints=self._current_guard_limited_joints,
-            )
             self._warn_throttled(
-                "Current guard limiting load-increasing motion: "
+                "Current guard v2 limiting load-increasing motion: "
                 f"Imax={decision.max_current_ma:.0f} mA, "
                 f"Itotal={decision.total_current_ma:.0f} mA"
             )
-        elif not decision.active and self._current_guard_active:
-            self._event("CURRENT_GUARD_RELEASED")
         self._current_guard_active = decision.active
 
         if decision.trip:
+            event = "CURRENT_GUARD_TRIP"
+            reason = "OVERCURRENT_GUARD"
             self._event(
-                "CURRENT_GUARD_TRIP",
+                event,
                 max_current_ma=decision.max_current_ma,
                 total_current_ma=decision.total_current_ma,
                 duration_s=decision.trip_duration_s,
+                limited_joints=self._current_guard_limited_joints,
             )
-            self._disarm("OVERCURRENT_GUARD")
+            self._disarm(reason)
             self.get_logger().error(
-                "OVERCURRENT_GUARD: sustained high motor current; output disarmed "
+                f"{reason}: sustained load fault; output disarmed "
                 f"(Imax={decision.max_current_ma:.0f} mA, "
                 f"Itotal={decision.total_current_ma:.0f} mA)"
             )
@@ -492,10 +567,41 @@ class Dg5fLeRobotBridge(Node):
                 self._resume_waiting_for_fresh_command = True
                 self._event("TRACKING_RESTORED_WAITING_FRESH_COMMAND")
 
+    def _load_event_transition(self, prefix, active, now, *, _event_key=None, **details):
+        """Immediate ACTIVE; RELEASED after 200 ms continuously unrestricted.
+
+        This debounces event reporting only, never commands or emergency trips.
+        Actual frame-by-frame state remains in diagnostics/timeline.csv.
+        """
+        key = prefix if _event_key is None else _event_key
+        latched, inactive_since = self._load_event_latches.get(key, (False, None))
+        if active:
+            if not latched:
+                self._event(prefix + "_ACTIVE", **details)
+            latched, inactive_since = True, None
+        elif latched:
+            inactive_since = now if inactive_since is None else inactive_since
+            if now - inactive_since >= 0.2:
+                self._event(prefix + "_RELEASED", **details)
+                latched, inactive_since = False, None
+        self._load_event_latches[key] = (latched, inactive_since)
+
     def _event(self, name, **details):
-        self._events_pub.publish(String(data=json.dumps({
+        def safe(value):
+            if isinstance(value, np.ndarray):
+                return safe(value.tolist())
+            if isinstance(value, np.generic):
+                return safe(value.item())
+            if isinstance(value, float) and not np.isfinite(value):
+                return None
+            if isinstance(value, dict):
+                return {key: safe(item) for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [safe(item) for item in value]
+            return value
+        self._events_pub.publish(String(data=json.dumps(safe({
             "event": name, "source_monotonic_s": time.monotonic(), **details,
-        })))
+        }), allow_nan=False)))
 
     def _disarm(self, reason):
         was_armed = self._armed
@@ -507,6 +613,11 @@ class Dg5fLeRobotBridge(Node):
             self._disarm_reason = reason
             self._robot.hold_position()
             self._event("DISARMED", reason=reason)
+            self._load_event_latches.clear()
+            self._compliance_active = self._current_guard_active = False
+            self._compliance_diagnostics["compliance_active"] = False
+            self._compliance_diagnostics["robot_contact_limit_active"] = False
+            self._compliance_diagnostics["yield_active"] = False
 
     def _input_failure(self):
         now = self._now_seconds()
@@ -844,6 +955,46 @@ class Dg5fLeRobotBridge(Node):
         snapshot["current_guard_max_current_ma"] = self._current_guard_max_current_ma
         snapshot["current_guard_total_current_ma"] = self._current_guard_total_current_ma
         snapshot["current_guard_limited_joints"] = self._current_guard_limited_joints
+        snapshot.update(self._compliance_diagnostics)
+        snapshot["compliance_age_ms"] = age_ms(self._last_compliance_time, now)
+        snapshot["contact_kinematics_error"] = self._contact_kinematics_error
+        snapshot["contact_finger_order"] = list(FINGERS)
+        snapshot["contact_pair_order"] = list(PAIR_NAMES)
+        timeout = float(self.get_parameter("compliance_contact_timeout_s").value)
+        for key in ("hybrid", "proximity"):
+            sample = self._contact_samples.get(key)
+            snapshot[f"{key}_signal_age_ms"] = age_ms(None if sample is None else sample[1], now)
+            valid = sample is not None and 0 <= now - sample[1] <= timeout
+            snapshot[f"{key}_signal_fresh"] = valid
+            if key == "hybrid":
+                snapshot["hybrid_contact_weights"] = sample[0][1:6] if valid else np.full(5, np.nan)
+            else:
+                snapshot["pair_distances_m"] = sample[0][1:] if valid else np.full(len(PAIR_NAMES), np.nan)
+        for name in vars(ComplianceConfig()):
+            snapshot[f"compliance_{name}"] = self.get_parameter(f"compliance_{name}").value
+        # Report actual active mode, even if an old launch passes enabled=true.
+        snapshot.update(compliance_enabled=False, compliance_yield_enabled=False,
+                        compliance_stall_enabled=False, contact_control_enabled=False,
+                        motion_control_mode="direct_guarded+current_guard_v2")
+        try:
+            observed = self._contact_for_diagnostics(
+                self._robot.command_shaper.effective_command(), now,
+                measured=values.get("measured_pos"), desired=self._latest_command_deg,
+            )
+            distances = observed.get("robot_pair_distances_m")
+            snapshot["contact_signal_valid"] = distances is not None
+            if distances is not None:
+                for i, label in enumerate(("measured", "effective", "desired")):
+                    snapshot[f"robot_{label}_pair_distances_mm"] = distances[i] * 1000
+                    snapshot[f"thumb_index_{label}_tip_distance_mm"] = float(distances[i, 0] * 1000)
+            weights = observed.get("hybrid_weights")
+            snapshot["thumb_index_human_contact_weight"] = float(min(weights[0], weights[1])) if weights is not None else float("nan")
+        except Exception as error:
+            snapshot["contact_signal_valid"] = False
+            snapshot["contact_kinematics_error"] = str(error)
+        for name in ("compliance_contact_timeout_s", "compliance_urdf_path",
+                     "hybrid_contact_topic", "safety_proximity_topic"):
+            snapshot[name] = self.get_parameter(name).value
         for name in (
             "current_guard_soft_ma",
             "current_guard_hard_ma",

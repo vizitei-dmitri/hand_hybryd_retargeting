@@ -25,20 +25,65 @@ dg5f_lerobot_bridge:
     tracking_resume_blend_s: 1.0
     # Manual ARM and automatic resume both reseed once from fresh physical pose.
     arm_pose_max_age_ms: 100.0
-    # Adaptive load guard. These are conservative empirical thresholds from
-    # our debug runs, not Tesollo's published absolute motor limits. Normal
-    # motion stayed <~200 mA/joint; failed runs reached ~900 mA on one joint
-    # and ~1.45 A total immediately before telemetry/Ethernet loss.
+    # Adaptive software load guard. This is an EXTRA envelope above the normal
+    # Tesollo/DGSDK/firmware protections; it does not disable or replace them.
+    # Thresholds are conservative empirical values from our debug runs, not
+    # Tesollo's published absolute motor limits. The latest reset happened near
+    # 1.2-1.27 A total, so total-load limiting now starts substantially earlier.
     current_guard_enabled: true
     current_guard_soft_ma: 350.0
     current_guard_hard_ma: 650.0
     current_guard_trip_ma: 850.0
-    current_guard_total_soft_ma: 800.0
-    current_guard_total_hard_ma: 1200.0
-    current_guard_total_trip_ma: 1400.0
-    current_guard_trip_hold_s: 0.06
+    current_guard_total_soft_ma: 600.0
+    current_guard_total_hard_ma: 850.0
+    current_guard_total_trip_ma: 1050.0
+    current_guard_trip_hold_s: 0.04
     # Restriction attacks immediately but releases over 0.2 s to avoid chatter.
     current_guard_release_tau_s: 0.20
+    # ROLLBACK: direct_guarded + current_guard_v2. Contact/FK are DEBUG ONLY.
+    # All experimental trajectory parameters below are inert in the ROS bridge;
+    # neither setting enabled=true nor contact packets can rewire control.
+    compliance_enabled: false
+    hybrid_contact_topic: /dg5f/hybrid_contact
+    safety_proximity_topic: /dg5f/safety_proximity
+    compliance_contact_timeout_s: 0.15
+    compliance_urdf_path: /workspace/models/dg5f/urdf/dg5f_right.urdf
+    compliance_joint_slope_soft_ma_s: 800.0
+    compliance_joint_slope_hard_ma_s: 3500.0
+    compliance_total_slope_soft_ma_s: 1200.0
+    compliance_total_slope_hard_ma_s: 5000.0
+    compliance_slope_filter_tau_s: 0.05
+    compliance_slope_max_reduction: 0.8
+    compliance_contact_preemptive_reduction: 0.12
+    compliance_contact_current_start_ma: 100.0
+    compliance_lead_min_deg: 1.0
+    compliance_lead_max_deg: 8.0
+    compliance_thumb_contact_start_m: 0.055
+    compliance_thumb_contact_full_m: 0.025
+    compliance_adjacent_contact_start_m: 0.030
+    compliance_adjacent_contact_full_m: 0.012
+    # Robot URDF tip-to-tip distances, NOT MANO distances. Empirical starting
+    # values for this prototype; human pinch intent alone never slows motion.
+    compliance_thumb_index_contact_distance_mm: 25.0
+    compliance_thumb_index_slowdown_start_mm: 35.0
+    # Short SOFT response only. Hard current/faults and TI boundary stay immediate.
+    compliance_soft_attack_tau_s: 0.03
+    compliance_soft_release_tau_s: 0.06
+    # Non-TI contact requires load and can never geometrically force scale=0.
+    compliance_other_contact_max_reduction: 0.5
+    # Confirm stationary moderate load before slowly shedding existing lead.
+    compliance_yield_enabled: false
+    compliance_yield_current_ma: 240.0
+    compliance_yield_error_deg: 4.0
+    compliance_yield_velocity_deg_s: 1.0
+    compliance_yield_hold_s: 0.25
+    compliance_yield_rate_deg_s: 5.0
+    # Additional sustained-stall backstop; does not replace fast current trip.
+    compliance_stall_enabled: false
+    compliance_stall_current_ma: 350.0
+    compliance_stall_error_deg: 8.0
+    compliance_stall_velocity_deg_s: 0.5
+    compliance_stall_hold_s: 0.5
     control_smoothing: false  # direct profile: no artificial speed/acceleration ramp
     max_speed_deg_s: 30.0
     max_accel_deg_s2: 60.0

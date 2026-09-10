@@ -9,10 +9,10 @@ def make_guard(**overrides):
         soft_ma=350.0,
         hard_ma=650.0,
         trip_ma=850.0,
-        total_soft_ma=800.0,
-        total_hard_ma=1200.0,
-        total_trip_ma=1400.0,
-        trip_hold_s=0.06,
+        total_soft_ma=600.0,
+        total_hard_ma=850.0,
+        total_trip_ma=1050.0,
+        trip_hold_s=0.04,
         release_tau_s=0.20,
         nominal_step_deg=5.0,
     )
@@ -73,7 +73,7 @@ def test_relief_motion_is_not_slowed_even_when_joint_is_loaded():
     assert decision.target_deg[4] == 0.0
 
 
-def test_hard_current_walks_command_back_toward_measured_pose():
+def test_hard_current_freezes_load_increasing_motion_at_effective_pose():
     guard = make_guard(total_soft_ma=5000.0, total_hard_ma=6000.0, total_trip_ma=7000.0)
     current = np.zeros(20)
     current[6] = 700.0
@@ -89,7 +89,7 @@ def test_hard_current_walks_command_back_toward_measured_pose():
         desired_deg=desired,
         now=1.0,
     )
-    assert decision.target_deg[6] == measured[6]
+    assert decision.target_deg[6] == effective[6]
     assert decision.active
 
 
@@ -104,8 +104,48 @@ def test_trip_requires_sustained_current_not_one_sample_spike():
         desired_deg=np.full(20, 30.0),
     )
     first = guard.update(now=1.00, **args)
-    second = guard.update(now=1.04, **args)
-    third = guard.update(now=1.07, **args)
+    second = guard.update(now=1.02, **args)
+    third = guard.update(now=1.05, **args)
     assert not first.trip
     assert not second.trip
     assert third.trip
+
+
+def test_total_hard_threshold_freezes_worsening_motion_but_allows_relief():
+    guard = make_guard(
+        soft_ma=5000.0, hard_ma=6000.0, trip_ma=7000.0,
+        total_soft_ma=600.0, total_hard_ma=850.0, total_trip_ma=1050.0,
+    )
+    current = np.full(20, 45.0)  # 900 mA total: above total hard threshold
+    measured = np.zeros(20)
+    effective = np.full(20, 20.0)
+
+    worsening = guard.update(
+        current_ma=current, measured_deg=measured, effective_deg=effective,
+        desired_deg=np.full(20, 40.0), now=1.0,
+    )
+    np.testing.assert_allclose(worsening.target_deg, effective)
+    assert worsening.active
+    assert worsening.total_current_ma == 900.0
+
+    relief = guard.update(
+        current_ma=current, measured_deg=measured, effective_deg=effective,
+        desired_deg=np.zeros(20), now=1.02,
+    )
+    np.testing.assert_allclose(relief.target_deg, np.zeros(20))
+
+
+def test_total_trip_uses_more_conservative_envelope():
+    guard = make_guard(
+        soft_ma=5000.0, hard_ma=6000.0, trip_ma=7000.0,
+        total_soft_ma=600.0, total_hard_ma=850.0, total_trip_ma=1050.0,
+        trip_hold_s=0.04,
+    )
+    current = np.full(20, 55.0)  # 1100 mA total
+    args = dict(
+        current_ma=current, measured_deg=np.zeros(20),
+        effective_deg=np.full(20, 10.0), desired_deg=np.full(20, 30.0),
+    )
+    assert not guard.update(now=2.00, **args).trip
+    assert not guard.update(now=2.02, **args).trip
+    assert guard.update(now=2.05, **args).trip

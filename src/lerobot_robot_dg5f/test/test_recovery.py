@@ -112,6 +112,76 @@ def bridge(monkeypatch):
     rclpy.shutdown()
 
 
+def prepare_mock_load(node, monkeypatch, current_ma, measured_deg):
+    assert isinstance(node._robot.backend, MockDg5fBackend)
+    # Exercise the direct profile without physical hardware.
+    node._robot.command_shaper.smoothing = False
+    node._robot.command_shaper.min_send_step_deg = 0.0
+    pose = np.zeros(20)
+    pose[6] = 60
+    node._robot.command_shaper.reset(pose)
+    node._robot.backend.send_positions(pose)
+    status = node._robot.get_diagnostics()
+    current = np.zeros(20)
+    current[6] = current_ma
+    measured = pose.copy()
+    measured[6] = measured_deg
+    status.update(measured_current=current, measured_pos=measured)
+    monkeypatch.setattr(node._robot, "get_diagnostics", lambda: status)
+    node._latest_command_deg = pose.copy()
+    node._latest_command_deg[6] = 80
+    node._armed = node._tracking_ok = True
+    return status
+
+
+def test_guarded_effective_not_vr_is_published_for_dataset(bridge, monkeypatch):
+    node, _ = bridge
+    status = prepare_mock_load(node, monkeypatch, current_ma=30, measured_deg=59)
+    assert node._current_guard.compliance is None
+
+    def forbid_contact_in_control(*args, **kwargs):
+        raise AssertionError("Contact/FK must only be evaluated by diagnostics")
+
+    monkeypatch.setattr(node, "_contact_for_diagnostics", forbid_contact_in_control)
+    messages = []
+    monkeypatch.setattr(node, "_commanded_state_pub", SimpleNamespace(publish=messages.append))
+    node._last_tracking_time = node._last_command_time = time.monotonic()
+    node._send_latest()
+    assert np.rad2deg(messages[-1].position[6]) == pytest.approx(65)
+    assert node._robot.backend._positions[6] == 65
+    assert node._latest_command_deg[6] == 80  # desired never rewritten
+    assert messages[-1].position[16] == 0
+    status["measured_current"][6] = 700
+    node._last_tracking_time = node._last_command_time = time.monotonic()
+    node._send_latest()
+    assert np.rad2deg(messages[-1].position[6]) == pytest.approx(65)  # hard freeze
+    node._latest_command_deg[6] = 20  # operator relief, beyond measured
+    node._last_tracking_time = node._last_command_time = time.monotonic()
+    node._send_latest()
+    assert np.rad2deg(messages[-1].position[6]) == pytest.approx(60)
+    assert node._compliance_diagnostics["joint_tracking_scale"][6] == 1
+
+
+@pytest.mark.parametrize("current,event,reason,frames", [
+    (900, "CURRENT_GUARD_TRIP", "OVERCURRENT_GUARD", 5),
+])
+def test_sustained_fault_disarms_mock_bridge_once(bridge, monkeypatch, current, event, reason, frames):
+    node, _ = bridge
+    prepare_mock_load(node, monkeypatch, current_ma=current, measured_deg=40)
+    events = []
+    monkeypatch.setattr(node, "_event", lambda name, **details: events.append(name))
+    clock = [time.monotonic()]
+    monkeypatch.setattr(node, "_now_seconds", lambda: clock[0])
+    for _ in range(frames):
+        node._last_tracking_time = node._last_command_time = clock[0]
+        node._send_latest()
+        clock[0] += 0.02
+    assert not node._armed
+    assert node._disarm_reason == reason
+    assert events.count(event) == 1
+    assert events.count("DISARMED") == 1
+
+
 @pytest.mark.parametrize("failure", ["TRACKING_TIMEOUT", "COMMAND_TIMEOUT"])
 def test_watchdog_disarm_reason_is_sticky(bridge, failure):
     node, _ = bridge
@@ -122,10 +192,20 @@ def test_watchdog_disarm_reason_is_sticky(bridge, failure):
     node._last_command_time = now if failure == "TRACKING_TIMEOUT" else now - 1
     node._latest_command_deg = np.zeros(20)
     node._send_latest()
+    expected_reason = failure
+    if failure == "TRACKING_TIMEOUT":
+        # Current pipeline intentionally holds during the 15 s tracking grace.
+        # Test the existing behavior without changing any control parameters.
+        assert node._armed
+        assert node._tracking_grace_active
+        grace_s = float(node.get_parameter("tracking_grace_s").value)
+        node._tracking_grace_started = time.monotonic() - grace_s - 0.01
+        node._send_latest()
+        expected_reason = "TRACKING_GRACE_EXPIRED"
     assert not node._armed
-    assert node._disarm_reason == failure
+    assert node._disarm_reason == expected_reason
     node._send_latest()
-    assert node._disarm_reason == failure
+    assert node._disarm_reason == expected_reason
 
 
 def test_explicit_recovery_service_keeps_ros_callbacks_alive_and_stays_disarmed(bridge):

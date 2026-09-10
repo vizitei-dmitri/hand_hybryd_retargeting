@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from .constants import JOINT_NAMES
+from dg5f_teleop.contact_signals import FINGERS, PAIR_NAMES
 
 
 ARRAY_FIELDS = (
@@ -30,12 +31,36 @@ ARRAY_FIELDS = (
     "error",
     "raw_current",
     "raw_velocity",
+    "joint_current_scale",
+    "joint_current_slope_ma_s",
+    "joint_slope_scale",
+    "joint_contact_scale",
+    "joint_tracking_scale",
+    "joint_lead_budget_deg",
+    "yield_delta_deg",
 )
+
+CONTACT_ARRAY_FIELDS = {
+    "hybrid_contact_weights": FINGERS,
+    "pair_distances_m": PAIR_NAMES,
+    "pair_distance_rates_m_s": PAIR_NAMES,
+    "pair_contact_weights": PAIR_NAMES,
+    "robot_measured_pair_distances_mm": PAIR_NAMES,
+    "robot_effective_pair_distances_mm": PAIR_NAMES,
+    "robot_desired_pair_distances_mm": PAIR_NAMES,
+    "pair_tracking_scale": PAIR_NAMES,
+}
 
 BOOL_FIELDS = (
     "tracking_ok",
     "armed",
     "current_guard_active",
+    "compliance_active",
+    "robot_contact_limit_active",
+    "yield_active",
+    "contact_signal_valid",
+    "hybrid_signal_fresh",
+    "proximity_signal_fresh",
     "transport_connected",
     "control_thread_alive",
     "motion_ready",
@@ -63,6 +88,23 @@ STATUS_FIELDS = (
     "current_guard_max_current_ma",
     "current_guard_total_current_ma",
     "current_guard_limited_joints",
+    "global_current_scale",
+    "global_slope_scale",
+    "total_current_ma",
+    "total_current_slope_ma_s",
+    "limited_fingers",
+    "yield_joints",
+    "contact_limited_pairs",
+    "stall_duration_s",
+    "compliance_age_ms",
+    "hybrid_signal_age_ms",
+    "proximity_signal_age_ms",
+    "contact_kinematics_error",
+    "thumb_index_human_contact_weight",
+    "thumb_index_measured_tip_distance_mm",
+    "thumb_index_effective_tip_distance_mm",
+    "thumb_index_desired_tip_distance_mm",
+    "thumb_index_contact_tracking_scale",
     "last_command_age_ms",
     "last_tracking_age_ms",
     "last_telemetry_age_ms",
@@ -155,6 +197,12 @@ class DebugRunWriter:
         )
         payload["timestamp_source"] = "time.monotonic"
         payload["schema_version"] = 2
+        payload["compliance_schema_version"] = 1
+        payload["contact_finger_order"] = list(FINGERS)
+        payload["contact_pair_order"] = list(PAIR_NAMES)
+        payload["contact_distance_unit"] = "metre (human MANO fingertips; not physical contact sensor)"
+        payload["current_slope_unit"] = "mA/s"
+        payload["joint_lead_budget_unit"] = "degree"
         payload["start_monotonic_s"] = self._start_monotonic
         payload["start_wall_time_unix_s"] = wall_time()
         payload["timeline_position_unit"] = "radian"
@@ -186,6 +234,8 @@ class DebugRunWriter:
                 _array_column(prefix, index) for index in range(len(JOINT_NAMES))
             )
         columns.extend(BOOL_FIELDS)
+        for prefix, names in CONTACT_ARRAY_FIELDS.items():
+            columns.extend(f"{prefix}_{name}" for name in names)
         columns.extend(STATUS_FIELDS)
         columns.extend(
             (
@@ -203,6 +253,10 @@ class DebugRunWriter:
 
         self.sample_count = 0
         self.event_counts: dict[str, int] = {}
+        self._compliance_samples = 0
+        self._min_tracking_scale = 1.0
+        self._contact_limited_counts = {}
+        self._previous_compliance = False
         self.reason_counts: dict[str, dict[str, int]] = {}
         self._fault_snapshots = []
         self.first_disconnect_time: float | None = None
@@ -257,6 +311,10 @@ class DebugRunWriter:
         self._network_file.flush()
 
     def _edge_events(self, row: Mapping[str, object], t: float) -> None:
+        compliance = bool(row["compliance_active"])
+        if compliance != self._previous_compliance and not self._arm_events_from_bridge:
+            self.add_event("COMPLIANCE_ACTIVE" if compliance else "COMPLIANCE_RELEASED", t=t, snapshot=dict(row))
+        self._previous_compliance = compliance
         armed = bool(row["armed"])
         old = self._previous["armed"]
         if armed and old is not True and not self._arm_events_from_bridge:
@@ -357,7 +415,27 @@ class DebugRunWriter:
         for key in BOOL_FIELDS:
             row[key] = int(bool(snapshot.get(key, False)))
         for key in STATUS_FIELDS:
-            row[key] = snapshot.get(key, "")
+            value = snapshot.get(key, "")
+            row[key] = json.dumps(value) if isinstance(value, (list, tuple)) else value
+        for prefix, names in CONTACT_ARRAY_FIELDS.items():
+            values = snapshot.get(prefix)
+            if not isinstance(values, (list, tuple)) or len(values) != len(names):
+                values = [math.nan] * len(names)
+            for name, value in zip(names, values):
+                try:
+                    row[f"{prefix}_{name}"] = float(value)
+                except (ValueError, TypeError):
+                    row[f"{prefix}_{name}"] = math.nan
+        self._compliance_samples += int(bool(row["compliance_active"]))
+        scales = [x for x in arrays["joint_tracking_scale"] if math.isfinite(x)]
+        if scales:
+            self._min_tracking_scale = min(self._min_tracking_scale, min(scales))
+        pairs = snapshot.get("contact_limited_pairs", [])
+        if isinstance(pairs, str):
+            pairs = pairs.split(",")
+        for pair in pairs:
+            if pair in PAIR_NAMES:
+                self._contact_limited_counts[pair] = self._contact_limited_counts.get(pair, 0) + 1
 
         max_current, current_joint = self._sample_maximum(
             arrays["current"], absolute=True
@@ -416,6 +494,15 @@ class DebugRunWriter:
         lines = [
             f"duration_s: {duration:.3f}",
             f"samples: {self.sample_count}",
+            f"compliance_active_samples: {self._compliance_samples}",
+            f"minimum_joint_tracking_scale: {self._min_tracking_scale}",
+            f"contact_limited_samples_by_pair: {json.dumps(self._contact_limited_counts)}",
+            f"compliance_active_events: {self.event_counts.get('COMPLIANCE_ACTIVE', 0)}",
+            f"compliance_released_events: {self.event_counts.get('COMPLIANCE_RELEASED', 0)}",
+            f"robot_contact_limit_active_events: {self.event_counts.get('ROBOT_CONTACT_LIMIT_ACTIVE', 0)}",
+            f"robot_contact_limit_released_events: {self.event_counts.get('ROBOT_CONTACT_LIMIT_RELEASED', 0)}",
+            f"current_guard_trip_events: {self.event_counts.get('CURRENT_GUARD_TRIP', 0)}",
+            f"stall_guard_trip_events: {self.event_counts.get('STALL_GUARD_TRIP', 0)}",
             f"arm_count: {self.event_counts.get('ARMED', 0)}",
             f"tracking_lost_count: {self.event_counts.get('TRACKING_LOST', 0)}",
             f"disarm_count_by_reason: {json.dumps(self.reason_counts.get('DISARMED', {}))}",

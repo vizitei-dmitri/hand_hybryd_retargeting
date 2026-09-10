@@ -1,0 +1,7 @@
+# Pass --cameras /workspace/src/lerobot_robot_dg5f/config/dataset_cameras.example.yaml
+# Only enable cameras that really publish sensor_msgs/Image. No config = no cameras.
+cameras:
+  front:
+    topic: /camera/front/image_raw
+  wrist:
+    topic: /camera/wrist/image_raw

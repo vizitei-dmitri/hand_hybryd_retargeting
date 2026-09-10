@@ -29,6 +29,8 @@ setup(
             "ros_bridge = lerobot_robot_dg5f.ros_bridge_node:main",
             "sdk_check = lerobot_robot_dg5f.sdk_check:main",
             "debug_recorder = lerobot_robot_dg5f.debug_recorder:main",
+            "dataset_recorder = lerobot_robot_dg5f.lerobot_dataset_recorder:main",
+            "dataset_check = lerobot_robot_dg5f.dataset_check:main",
         ],
     },
 )

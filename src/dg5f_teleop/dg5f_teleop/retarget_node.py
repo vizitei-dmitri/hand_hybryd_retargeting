@@ -17,11 +17,14 @@ from geometry_msgs.msg import PoseArray
 from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float64MultiArray, MultiArrayDimension
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from dg5f_teleop.constants import JOINT_NAMES
 from dg5f_teleop.hand_math import landmarks_to_mano
+from dg5f_teleop.contact_signals import (
+    HYBRID_LAYOUT, PROXIMITY_LAYOUT, fingertip_distances,
+)
 
 
 NON_THUMB_DISTAL_FLEXION_JOINTS = tuple(
@@ -106,6 +109,8 @@ class RetargetNode(Node):
         self.declare_parameter("command_topic", "/dg5f/joint_command")
         self.declare_parameter("target_state_topic", "/dg5f/target_joint_states")
         self.declare_parameter("tracking_topic", "/dg5f/tracking_ok")
+        self.declare_parameter("hybrid_contact_topic", "/dg5f/hybrid_contact")
+        self.declare_parameter("safety_proximity_topic", "/dg5f/safety_proximity")
         self.declare_parameter("urdf_path", "")
         self.declare_parameter("retargeting_config", "")
         self.declare_parameter("scaling_factor", 1.0)
@@ -208,6 +213,12 @@ class RetargetNode(Node):
         )
         self._tracking_publisher = self.create_publisher(
             Bool, str(self.get_parameter("tracking_topic").value), 1
+        )
+        self._hybrid_contact_pub = self.create_publisher(
+            Float64MultiArray, str(self.get_parameter("hybrid_contact_topic").value), 1
+        )
+        self._safety_proximity_pub = self.create_publisher(
+            Float64MultiArray, str(self.get_parameter("safety_proximity_topic").value), 1
         )
         self._subscription = self.create_subscription(
             PoseArray,
@@ -439,6 +450,27 @@ class RetargetNode(Node):
         self._last_command_time = now
         self._set_tracking(True)
         self._publish_command(message, target)
+        # Publish independently AFTER the exact existing target has been produced.
+        # Proximity failures must not alter Vector/DexPilot/Hybrid optimizer state.
+        try:
+            self._publish_contact(message, mano_points)
+        except Exception as error:
+            self._warn_throttled(f"Contact diagnostics unavailable: {error}")
+
+    def _publish_contact(self, source, mano_points):
+        stamp = source.header.stamp.sec + source.header.stamp.nanosec * 1e-9
+        if stamp <= 0:
+            stamp = self._now_seconds()
+        distances = fingertip_distances(mano_points)
+        def publish(publisher, label, values):
+            packet = Float64MultiArray(data=[float(x) for x in values])
+            packet.layout.dim = [MultiArrayDimension(label=label, size=len(values), stride=len(values))]
+            publisher.publish(packet)
+        publish(self._safety_proximity_pub, PROXIMITY_LAYOUT, [stamp, *distances])
+        if self._hybrid:
+            # Same pure function/parameters as blending; no changes to retarget result.
+            weights = self._hybrid_weights(mano_points)
+            publish(self._hybrid_contact_pub, HYBRID_LAYOUT, [stamp, *weights, *distances[:4]])
 
     def _publish_command(self, source: PoseArray, target: np.ndarray) -> None:
         trajectory = JointTrajectory()

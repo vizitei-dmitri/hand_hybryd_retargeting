@@ -18,6 +18,9 @@ ROS-TCP-Endpoint -> 21 landmark -> Hybrid retargeting
                  MuJoCo visualization       ROS -> LeRobot adapter
                                                     |
                                                     v
+                                           Current guard v2
+                                                    |
+                                                    v
                                           PositionCommandShaper
                                                     |
                                                     v
@@ -36,6 +39,13 @@ ROS-TCP-Endpoint -> 21 landmark -> Hybrid retargeting
 ROS здесь является message bus для Quest, ретаргетинга, MuJoCo и telemetry.
 Моторы не управляются через `ros2_control`: физическая кисть получает position
 setpoint напрямую через Python API `dg5f_python.set_target_position()`.
+
+Активный профиль — `direct_guarded + current_guard_v2`: без сглаживания обычного
+tracking, с шагом до 5° и токовым ограничением движения в сторону нагрузки.
+Экспериментальные compliance/contact-ограничения отключены от управления;
+contact/FK остаются только в диагностике. ARM blend и tracking grace/resume сохранены.
+Точные параметры и границы отката:
+[docs/CURRENT_GUARD_V2_BASELINE.md](docs/CURRENT_GUARD_V2_BASELINE.md).
 
 ## Неисправный сустав мизинца
 
@@ -448,6 +458,12 @@ bash scripts/set_hybrid_params.sh 0.80 0.055 0.025 0.45 0.12 0.35 0.18
 проект для YAML не требуется.
 
 ## Диагностика и тесты
+
+Запись демонстраций в официальный **LeRobotDataset** (отдельный пассивный узел,
+без второго соединения с кистью):
+[`docs/LEROBOT_DATASET_RECORDING.md`](docs/LEROBOT_DATASET_RECORDING.md).
+Гайд содержит workflow `dataset-record/start/finish/discard/check`, камеры,
+обработку tracking loss и offline mock-тест. Текущая логика управления не меняется.
 
 ```bash
 bash scripts/stack.sh topics

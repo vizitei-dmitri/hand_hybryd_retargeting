@@ -23,7 +23,8 @@ from std_msgs.msg import Bool, Float32MultiArray, String
 from trajectory_msgs.msg import JointTrajectory
 
 from .constants import JOINT_NAMES, TESOLLO_TEMPERATURE_LIMIT_C
-from .debug_recording import DebugRunWriter, NETWORK_FIELDS
+from .debug_recording import DebugRunWriter, NETWORK_FIELDS, CONTACT_ARRAY_FIELDS
+from .current_guard import ComplianceConfig
 
 
 TOPICS = {
@@ -73,6 +74,8 @@ def collect_manifest(args: argparse.Namespace) -> dict[str, object]:
             "disabled_positions_deg",
         )
         configuration = {key: parameters.get(key) for key in wanted}
+        configuration.update({key: value for key, value in parameters.items()
+                              if key.startswith(("compliance_", "current_guard_"))})
     except (OSError, TypeError, KeyError, yaml.YAMLError):
         configuration = {"config_read_error": str(config_path)}
     return {
@@ -172,13 +175,19 @@ def _parse_diagnostics(message: DiagnosticArray) -> dict[str, object]:
                 "measured_temp",
                 "raw_velocity",
                 "raw_current",
-            }:
+                "joint_current_scale", "joint_current_slope_ma_s", "joint_slope_scale",
+                "joint_contact_scale", "joint_tracking_scale", "joint_lead_budget_deg",
+                "yield_delta_deg",
+            } or item.key in CONTACT_ARRAY_FIELDS:
                 try:
                     array = [float(value) for value in item.value.split(",")]
                 except ValueError:
                     continue
-                if len(array) == len(JOINT_NAMES):
+                expected = len(CONTACT_ARRAY_FIELDS.get(item.key, JOINT_NAMES))
+                if len(array) == expected:
                     decoded[item.key] = array
+            elif item.key in {"limited_fingers", "contact_limited_pairs"}:
+                decoded[item.key] = [value for value in item.value.split(",") if value]
             else:
                 decoded[item.key] = _parse_scalar(item.value)
     return decoded
@@ -340,6 +349,10 @@ class Dg5fDebugRecorder(Node):
     def _on_diagnostics(self, message: DiagnosticArray) -> None:
         self._last_diagnostics_at = time.monotonic()
         self._diagnostics.update(_parse_diagnostics(message))
+        for name in vars(ComplianceConfig()):
+            key = f"compliance_{name}"
+            if key in self._diagnostics:
+                self.writer.manifest.setdefault("runtime_configuration", {})[key] = self._diagnostics[key]
         for key in (
             "control_smoothing", "command_profile", "max_speed_deg_s",
             "max_accel_deg_s2", "response_time_s", "filter_tau_s",
@@ -349,6 +362,8 @@ class Dg5fDebugRecorder(Node):
             "current_guard_total_soft_ma", "current_guard_total_hard_ma",
             "current_guard_total_trip_ma", "current_guard_trip_hold_s",
             "current_guard_release_tau_s",
+            "compliance_contact_timeout_s", "compliance_urdf_path",
+            "hybrid_contact_topic", "safety_proximity_topic",
         ):
             if key in self._diagnostics:
                 self.writer.manifest.setdefault("runtime_configuration", {})[key] = self._diagnostics[key]
@@ -378,7 +393,10 @@ class Dg5fDebugRecorder(Node):
         except (ValueError, TypeError):
             return
         # Arm/recovery transitions can occur between timeline samples.
-        if event.get("event") in {"ARM_REQUESTED", "ARMED", "DISARMED", "RECOVERY_STARTED", "RECOVERY_SUCCEEDED", "RECOVERY_FAILED"}:
+        if event.get("event") in {"ARM_REQUESTED", "ARMED", "DISARMED", "RECOVERY_STARTED", "RECOVERY_SUCCEEDED", "RECOVERY_FAILED",
+                                 "COMPLIANCE_ACTIVE", "COMPLIANCE_RELEASED", "CURRENT_GUARD_TRIP", "STALL_GUARD_TRIP",
+                                 "ROBOT_CONTACT_LIMIT_ACTIVE", "ROBOT_CONTACT_LIMIT_RELEASED",
+                                 "CURRENT_GUARD_ACTIVE", "CURRENT_GUARD_RELEASED"}:
             name = event.pop("event")
             source_time = event.get("source_monotonic_s")
             relative = None if source_time is None else source_time - self.writer.manifest["start_monotonic_s"]
