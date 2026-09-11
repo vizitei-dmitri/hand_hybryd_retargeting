@@ -68,7 +68,7 @@ class ContactKinematics:
                 link = record[0]
             self.chains.append(list(reversed(chain)))
 
-    def tips_and_jacobians(self, positions_deg, *, with_jacobians=True):
+    def tips_and_jacobians(self, positions_deg):
         q = np.asarray(positions_deg, dtype=np.float64)
         if q.shape != (20,) or not np.all(np.isfinite(q)):
             raise ValueError("Safety FK requires 20 finite degree positions")
@@ -79,8 +79,7 @@ class ContactKinematics:
             for _, origin, index, axis in chain:
                 transform = transform @ origin
                 if index is not None:
-                    if with_jacobians:
-                        axes.append((index, transform[:3, :3] @ axis, transform[:3, 3].copy()))
+                    axes.append((index, transform[:3, :3] @ axis, transform[:3, 3].copy()))
                     motion = np.eye(4)
                     motion[:3, :3] = rotation(axis, np.deg2rad(q[index]))
                     transform = transform @ motion
@@ -90,21 +89,11 @@ class ContactKinematics:
         return tips, jacobians
 
     def pair_gradients(self, positions_deg):
-        return self.pair_geometry(positions_deg)[1]
-
-    def pair_distances(self, positions_deg):
-        tips, _ = self.tips_and_jacobians(positions_deg, with_jacobians=False)
-        return np.array([np.linalg.norm(tips[b] - tips[a]) for a, b in PAIRS])
-
-    def pair_geometry(self, positions_deg):
-        """Distances and their gradients from the SAME existing URDF evaluator."""
         tips, jacobians = self.tips_and_jacobians(positions_deg)
         result = np.zeros((len(PAIRS), 20))
-        distances = np.zeros(len(PAIRS))
         for index, (a, b) in enumerate(PAIRS):
             difference = tips[b] - tips[a]
             distance = np.linalg.norm(difference)
-            distances[index] = distance
             if distance > 1e-8:
                 result[index] = difference / distance @ (jacobians[b] - jacobians[a])
-        return distances, result
+        return result

@@ -10,8 +10,7 @@ from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseArray
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Float64MultiArray
-from dg5f_teleop.contact_signals import decode_contact_packet
+from std_msgs.msg import Bool
 from trajectory_msgs.msg import JointTrajectory
 from vr_haptic_msgs.msg import ManoLandmarks
 
@@ -50,22 +49,12 @@ class SmokeValidator(Node):
         )
         self.create_subscription(Bool, "/dg5f/tracking_ok", self._tracking, 10)
         self.create_subscription(Bool, "/dg5f/lerobot/armed", self._armed, 10)
-        for topic, hybrid in [("hybrid_contact", True), ("safety_proximity", False)]:
-            self.create_subscription(Float64MultiArray, "/dg5f/" + topic,
-                                     lambda msg, h=hybrid: self._contact(msg, h), 10)
         self.create_subscription(
             DiagnosticArray,
             "/dg5f/lerobot/diagnostics",
             self._diagnostics,
             10,
         )
-
-    def _contact(self, message, hybrid):
-        try:
-            decode_contact_packet(message.data, hybrid=hybrid)
-            self.received.add("hybrid_contact" if hybrid else "safety_proximity")
-        except ValueError as error:
-            self.errors.append(str(error))
 
     def _quest(self, message: ManoLandmarks) -> None:
         if len(message.landmarks) == 21:
@@ -123,9 +112,6 @@ class SmokeValidator(Node):
                 "max_current",
                 "max_temperature",
                 "max_tracking_error_deg",
-                "joint_tracking_scale",
-                "total_current_slope_ma_s",
-                "contact_signal_valid",
             }
             if required <= values.keys():
                 if values.get("current_unit") != "mA" or values.get("raw_velocity_unit") != "rpm":
@@ -134,43 +120,33 @@ class SmokeValidator(Node):
                 if values.get("command_profile") != "direct_guarded":
                     self.errors.append("Default launch did not enable guarded direct command profile")
                     return
-                if values.get("contact_signal_valid", "").lower() != "true":
-                    return
                 self.received.add("diagnostics")
 
 
 class DisarmValidator(Node):
-    """Verify the existing 15-second tracking grace, then its reasoned disarm."""
+    """Wait for the command watchdog to publish the disarmed state."""
 
     def __init__(self) -> None:
         super().__init__("dg5f_lerobot_disarm_validator")
         self.disarmed = False
-        self.in_grace = False
-        self.create_subscription(DiagnosticArray, "/dg5f/lerobot/diagnostics", self._diagnostics, 10)
+        self.create_subscription(Bool, "/dg5f/lerobot/armed", self._armed, 10)
 
-    def _diagnostics(self, message):
-        for status in message.status:
-            if status.name != "dg5f_lerobot_bridge":
-                continue
-            values = {item.key: item.value for item in status.values}
-            self.in_grace = (values.get("armed", "").lower() == "true" and
-                             values.get("tracking_grace_active", "").lower() == "true")
-            self.disarmed = (values.get("armed", "").lower() == "false" and
-                             values.get("disarm_reason") == "TRACKING_GRACE_EXPIRED")
+    def _armed(self, message: Bool) -> None:
+        if not message.data:
+            self.disarmed = True
 
 
-def validate_disarmed(expect_grace=False) -> int:
+def validate_disarmed() -> int:
     rclpy.init()
     node = DisarmValidator()
-    deadline = time.monotonic() + (3.0 if expect_grace else 18.0)
-    ready = lambda: node.in_grace if expect_grace else node.disarmed
+    deadline = time.monotonic() + 3.0
     try:
-        while time.monotonic() < deadline and not ready():
+        while time.monotonic() < deadline and not node.disarmed:
             rclpy.spin_once(node, timeout_sec=0.1)
-        if not ready():
-            print("Tracking watchdog did not enter expected grace/disarmed state", file=sys.stderr)
+        if not node.disarmed:
+            print("Command watchdog did not disarm LeRobot output", file=sys.stderr)
             return 1
-        print("Validated tracking grace hold." if expect_grace else "Validated TRACKING_GRACE_EXPIRED disarm.")
+        print("Validated command-timeout disarm.")
         return 0
     finally:
         node.destroy_node()
@@ -180,10 +156,9 @@ def validate_disarmed(expect_grace=False) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--expect-disarmed", action="store_true")
-    parser.add_argument("--expect-tracking-grace", action="store_true")
     args = parser.parse_args()
-    if args.expect_disarmed or args.expect_tracking_grace:
-        return validate_disarmed(args.expect_tracking_grace)
+    if args.expect_disarmed:
+        return validate_disarmed()
 
     required = {
         "quest",
@@ -195,8 +170,6 @@ def main() -> int:
         "tracking",
         "armed",
         "diagnostics",
-        "hybrid_contact",
-        "safety_proximity",
     }
     rclpy.init()
     node = SmokeValidator()

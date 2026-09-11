@@ -24,7 +24,7 @@ class Dg5fConfig(RobotConfig):
     filter_tau_s: float = 0.05
     target_deadband_deg: float = 0.20
     min_send_step_deg: float = 0.20
-    max_direct_step_deg: float = 5.0
+    max_direct_step_deg: float = 4.0
     startup_blend_s: float = 0.70
     max_dt_s: float = 0.05
     initial_feedback_timeout_s: float = 2.0

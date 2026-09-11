@@ -16,7 +16,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from .constants import JOINT_NAMES
+from .constants import FINGER_FLEXION_JOINTS, JOINT_NAMES
 from dg5f_teleop.contact_signals import FINGERS, PAIR_NAMES
 
 
@@ -37,7 +37,15 @@ ARRAY_FIELDS = (
     "joint_contact_scale",
     "joint_tracking_scale",
     "joint_lead_budget_deg",
-    "yield_delta_deg",
+    "contact_anchor_measured",
+    "contact_anchor_effective",
+    "contact_anchor_desired",
+)
+
+OBJECT_CONTACT_FINGER_FIELDS = (
+    "object_contact_state", "object_contact_active", "object_contact_reason",
+    "finger_current_ma", "finger_max_joint_current_ma", "finger_tracking_error_deg",
+    "finger_progress_ratio", "post_contact_gain", "contact_preload_deg",
 )
 
 CONTACT_ARRAY_FIELDS = {
@@ -45,10 +53,6 @@ CONTACT_ARRAY_FIELDS = {
     "pair_distances_m": PAIR_NAMES,
     "pair_distance_rates_m_s": PAIR_NAMES,
     "pair_contact_weights": PAIR_NAMES,
-    "robot_measured_pair_distances_mm": PAIR_NAMES,
-    "robot_effective_pair_distances_mm": PAIR_NAMES,
-    "robot_desired_pair_distances_mm": PAIR_NAMES,
-    "pair_tracking_scale": PAIR_NAMES,
 }
 
 BOOL_FIELDS = (
@@ -56,8 +60,6 @@ BOOL_FIELDS = (
     "armed",
     "current_guard_active",
     "compliance_active",
-    "robot_contact_limit_active",
-    "yield_active",
     "contact_signal_valid",
     "hybrid_signal_fresh",
     "proximity_signal_fresh",
@@ -93,18 +95,13 @@ STATUS_FIELDS = (
     "total_current_ma",
     "total_current_slope_ma_s",
     "limited_fingers",
-    "yield_joints",
     "contact_limited_pairs",
+    "object_contact_limited_joints",
     "stall_duration_s",
     "compliance_age_ms",
     "hybrid_signal_age_ms",
     "proximity_signal_age_ms",
     "contact_kinematics_error",
-    "thumb_index_human_contact_weight",
-    "thumb_index_measured_tip_distance_mm",
-    "thumb_index_effective_tip_distance_mm",
-    "thumb_index_desired_tip_distance_mm",
-    "thumb_index_contact_tracking_scale",
     "last_command_age_ms",
     "last_tracking_age_ms",
     "last_telemetry_age_ms",
@@ -198,6 +195,9 @@ class DebugRunWriter:
         payload["timestamp_source"] = "time.monotonic"
         payload["schema_version"] = 2
         payload["compliance_schema_version"] = 1
+        payload["object_contact_schema_version"] = 1
+        payload["object_contact_flexion_joints"] = FINGER_FLEXION_JOINTS
+        payload["object_contact_anchor_unit"] = "degree (DGSDK joint order; NaN for non-flexion joints)"
         payload["contact_finger_order"] = list(FINGERS)
         payload["contact_pair_order"] = list(PAIR_NAMES)
         payload["contact_distance_unit"] = "metre (human MANO fingertips; not physical contact sensor)"
@@ -236,6 +236,8 @@ class DebugRunWriter:
         columns.extend(BOOL_FIELDS)
         for prefix, names in CONTACT_ARRAY_FIELDS.items():
             columns.extend(f"{prefix}_{name}" for name in names)
+        for prefix in OBJECT_CONTACT_FINGER_FIELDS:
+            columns.extend(f"{prefix}_{name}" for name in FINGERS)
         columns.extend(STATUS_FIELDS)
         columns.extend(
             (
@@ -426,6 +428,12 @@ class DebugRunWriter:
                     row[f"{prefix}_{name}"] = float(value)
                 except (ValueError, TypeError):
                     row[f"{prefix}_{name}"] = math.nan
+        for prefix in OBJECT_CONTACT_FINGER_FIELDS:
+            values = snapshot.get(prefix)
+            if not isinstance(values, (list, tuple)) or len(values) != len(FINGERS):
+                values = [""] * len(FINGERS)
+            for name, value in zip(FINGERS, values):
+                row[f"{prefix}_{name}"] = value
         self._compliance_samples += int(bool(row["compliance_active"]))
         scales = [x for x in arrays["joint_tracking_scale"] if math.isfinite(x)]
         if scales:
@@ -499,8 +507,6 @@ class DebugRunWriter:
             f"contact_limited_samples_by_pair: {json.dumps(self._contact_limited_counts)}",
             f"compliance_active_events: {self.event_counts.get('COMPLIANCE_ACTIVE', 0)}",
             f"compliance_released_events: {self.event_counts.get('COMPLIANCE_RELEASED', 0)}",
-            f"robot_contact_limit_active_events: {self.event_counts.get('ROBOT_CONTACT_LIMIT_ACTIVE', 0)}",
-            f"robot_contact_limit_released_events: {self.event_counts.get('ROBOT_CONTACT_LIMIT_RELEASED', 0)}",
             f"current_guard_trip_events: {self.event_counts.get('CURRENT_GUARD_TRIP', 0)}",
             f"stall_guard_trip_events: {self.event_counts.get('STALL_GUARD_TRIP', 0)}",
             f"arm_count: {self.event_counts.get('ARMED', 0)}",

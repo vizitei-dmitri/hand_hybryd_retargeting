@@ -18,9 +18,6 @@ ROS-TCP-Endpoint -> 21 landmark -> Hybrid retargeting
                  MuJoCo visualization       ROS -> LeRobot adapter
                                                     |
                                                     v
-                                           Current guard v2
-                                                    |
-                                                    v
                                           PositionCommandShaper
                                                     |
                                                     v
@@ -39,15 +36,6 @@ ROS-TCP-Endpoint -> 21 landmark -> Hybrid retargeting
 ROS здесь является message bus для Quest, ретаргетинга, MuJoCo и telemetry.
 Моторы не управляются через `ros2_control`: физическая кисть получает position
 setpoint напрямую через Python API `dg5f_python.set_target_position()`.
-
-Активный профиль — `direct_guarded + current_guard_v2`: без сглаживания обычного
-tracking, с шагом до 5° и токовым ограничением движения в сторону нагрузки.
-Экспериментальные compliance/contact-ограничения отключены от управления;
-contact/FK остаются только в диагностике. ARM blend и tracking grace/resume сохранены.
-Точные параметры и границы отката:
-[docs/CURRENT_GUARD_V2_BASELINE.md](docs/CURRENT_GUARD_V2_BASELINE.md).
-Reference восстановлен из ZIP + `dg5f_current_guard_v2.patch` для запуска
-08.09 12:49 и закреплён тегом `baseline/current-guard-v2-2026-09-08`.
 
 ## Неисправный сустав мизинца
 
@@ -622,12 +610,37 @@ bash scripts/stack.sh stop
 
 ### Guarded direct tracking
 
-Physical Tesollo mode uses direct tracking without the old 30 deg/s acceleration ramp, but it no longer permits a one-frame 50-90 degree jump. On every ARM the software command starts from the last backend-accepted pose and blends toward the live VR target for 0.70 s. After that, direct mode limits each 50 Hz command step to 5 degrees (about 250 deg/s equivalent). These are software setpoint guards; joint limits, the fixed broken pinky joint, and Tesollo thermal protection remain active.
+Physical Tesollo mode uses direct tracking without the old 30 deg/s acceleration ramp, but it no longer permits a one-frame 50-90 degree jump. On every ARM the software command starts from the last backend-accepted pose and blends toward the live VR target for 0.70 s. After that, direct mode limits each 50 Hz command step to 4 degrees (about 200 deg/s equivalent). These are software setpoint guards; joint limits, the fixed broken pinky joint, and Tesollo thermal protection remain active.
+
+Contact and dI/dt tracking scale use separate attack/release time constants of 0.04/0.10 s. Current protection still attacks immediately, releases over 0.20 s, and keeps the existing joint/total thresholds and 0.04 s trip hold.
+
+Physical object contact adds a per-finger `FREE → CONTACT_PENDING → CONTACT_HOLD` latch,
+independent of MANO proximity. Defaults in `bridge.params.yaml` require a flexion motor
+at 200 mA, 3° positive servo error and less than 25% measured progress over a 0.12 s
+position window, sustained for 0.08 s. A 350 mA / 4° load or rising current can shorten
+confirmation to 0.02 s; both still require poor physical progress and closing intent.
+The window also detects an outstanding closure request when the effective command
+has already stopped advancing. A single noisy SDK velocity sample is not used.
+
+The whole flexion chain then uses a 0.05 additional closing gain. Only confirmed
+contact permits local preload relief, limited to 15°/s: the preload decreases from
+1.5° at 200 mA through 1.0° at 300 mA to 0.5° at 400 mA. Contact anchors remain fixed;
+live measured pose prevents excessive preload. Opening uses unit gain and releases
+the latch after 3°. Low current (<120 mA), error <1.5° and renewed measured progress
+allow release after 0.15 s, with catch-up limited to 15°/s. All `object_contact_*`
+thresholds, gains and times are configurable. The original soft-compliance tuning,
+current thresholds, trip timer, shaper and hardware loop are retained.
+
+`object_contact.py` holds the finger state; named flexion roles follow the URDF in
+`constants.py` (thumb `_1/_3/_4`, index/middle/ring `_2/_3/_4`, little `_3/_4`).
+Debug timelines include per-finger state/reason/load/progress/gain/preload and the
+three contact anchors in degrees. `OBJECT_CONTACT_PENDING`, `OBJECT_CONTACT_LATCHED`
+and `OBJECT_CONTACT_RELEASED` events are emitted only on transitions.
 
 Tune without rebuilding the image:
 
 ```bash
-DG5F_STARTUP_BLEND_S=0.70 DG5F_MAX_DIRECT_STEP_DEG=5.0 \
+DG5F_STARTUP_BLEND_S=0.70 DG5F_MAX_DIRECT_STEP_DEG=4.0 \
   bash scripts/stack.sh hardware 10000 hybrid 169.254.186.72
 ```
 

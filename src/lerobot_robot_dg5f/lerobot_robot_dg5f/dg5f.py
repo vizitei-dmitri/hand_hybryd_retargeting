@@ -262,7 +262,7 @@ class Dg5f(Robot):
         if self.command_shaper.is_initialized:
             self.command_shaper.hold()
 
-    def send_action(self, action: RobotAction) -> RobotAction:
+    def send_action(self, action: RobotAction, *, command_bounds=None) -> RobotAction:
         if not self.is_connected:
             raise RuntimeError("DG5F is not connected")
 
@@ -281,7 +281,7 @@ class Dg5f(Robot):
         if not np.all(np.isfinite(requested)):
             raise ValueError("DG5F action contains NaN or infinity")
 
-        step = self.command_shaper.step(requested)
+        step = self.command_shaper.step(requested, command_bounds=command_bounds)
         if step.should_send:
             self.backend.send_positions(step.output_deg)
             self.command_shaper.accept_output(step.output_deg)

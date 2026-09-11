@@ -170,7 +170,7 @@ case "${1:-help}" in
       viewer=false
     fi
     "${compose[@]}" exec "${service}" bash -lc \
-      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} lerobot_control_smoothing:=${DG5F_CONTROL_SMOOTHING:-false} lerobot_max_direct_step_deg:=${DG5F_MAX_DIRECT_STEP_DEG:-5.0} lerobot_startup_blend_s:=${DG5F_STARTUP_BLEND_S:-0.70} max_joint_velocity:=${DG5F_MAX_JOINT_VELOCITY:-0.0} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
+      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} lerobot_control_smoothing:=${DG5F_CONTROL_SMOOTHING:-false} lerobot_max_direct_step_deg:=${DG5F_MAX_DIRECT_STEP_DEG:-4.0} lerobot_startup_blend_s:=${DG5F_STARTUP_BLEND_S:-0.70} max_joint_velocity:=${DG5F_MAX_JOINT_VELOCITY:-0.0} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
     ;;
   hardware|hardware-headless)
     require_container
@@ -186,7 +186,7 @@ case "${1:-help}" in
     echo "Starting REAL Tesollo backend at ${hand_ip}:502 in DISARMED state."
     echo "After checking tracking and MuJoCo, use: bash scripts/stack.sh arm"
     "${compose[@]}" exec "${service}" bash -lc \
-      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} lerobot_backend:=tesollo lerobot_auto_enable:=false lerobot_ip:=${hand_ip} lerobot_control_smoothing:=${DG5F_CONTROL_SMOOTHING:-false} lerobot_max_direct_step_deg:=${DG5F_MAX_DIRECT_STEP_DEG:-5.0} lerobot_startup_blend_s:=${DG5F_STARTUP_BLEND_S:-0.70} max_joint_velocity:=${DG5F_MAX_JOINT_VELOCITY:-0.0} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
+      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} lerobot_backend:=tesollo lerobot_auto_enable:=false lerobot_ip:=${hand_ip} lerobot_control_smoothing:=${DG5F_CONTROL_SMOOTHING:-false} lerobot_max_direct_step_deg:=${DG5F_MAX_DIRECT_STEP_DEG:-4.0} lerobot_startup_blend_s:=${DG5F_STARTUP_BLEND_S:-0.70} max_joint_velocity:=${DG5F_MAX_JOINT_VELOCITY:-0.0} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
     ;;
   arm|disarm)
     require_container

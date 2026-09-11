@@ -8,16 +8,18 @@ import pytest
 from lerobot_robot_dg5f.command_shaper import PositionCommandShaper
 from lerobot_robot_dg5f.constants import JOINT_NAMES, LOWER_LIMITS_DEG, UPPER_LIMITS_DEG
 from lerobot_robot_dg5f.contact_kinematics import ContactKinematics
-from lerobot_robot_dg5f.experimental_current_guard import AdaptiveCurrentGuard, ComplianceConfig
+from lerobot_robot_dg5f.current_guard import AdaptiveCurrentGuard, ComplianceConfig
 
 
-def make_guard(**config):
-    return AdaptiveCurrentGuard(
+def make_guard(*, nominal_step_deg=5, **config):
+    guard = AdaptiveCurrentGuard(
         20, soft_ma=350, hard_ma=650, trip_ma=850,
         total_soft_ma=600, total_hard_ma=850, total_trip_ma=1050,
-        trip_hold_s=0.04, release_tau_s=0.2, nominal_step_deg=5,
+        trip_hold_s=0.04, release_tau_s=0.2, nominal_step_deg=nominal_step_deg,
         compliance=ComplianceConfig(**config),
     )
+    guard.reset(now=0.98)  # First update at 1.0 has one 50 Hz control interval.
+    return guard
 
 
 def contact(now=1.0, pair=0):
@@ -28,12 +30,8 @@ def contact(now=1.0, pair=0):
         gradients[pair, [2, 6]] = -0.001
     else:
         gradients[pair, [10, 14]] = -0.001
-    robot = np.tile(distances, (3, 1))
-    if pair == 0:
-        robot[:, 0] = [0.027, 0.027, 0.007]
     return dict(pair_distances_m=distances, pair_gradients_m_deg=gradients,
-                hybrid_weights=np.array([0.8, 0.8, 0, 0, 0]), contact_stamp_s=now,
-                robot_pair_distances_m=robot)
+                hybrid_weights=np.array([0.8, 0.8, 0, 0, 0]), contact_stamp_s=now)
 
 
 def update(guard, current=0.0, effective=10.0, measured=9.0, desired=80.0, now=1.0, **extra):
@@ -51,12 +49,11 @@ def test_free_motion_is_unchanged():
         assert not decision.active
 
 
-def test_human_contact_alone_does_not_reduce_closing_step():
-    signals = contact()
-    signals["robot_pair_distances_m"][:, 0] = [0.085, 0.070, 0.007]
-    decision = update(make_guard(), **signals)
-    assert decision.target_deg[6] == 80
-    assert decision.diagnostics["joint_tracking_scale"][6] == 1
+def test_contact_alone_only_mildly_reduces_closing_step():
+    decision = update(make_guard(), **contact())
+    scale = 1 - 0.06 * (1 - np.exp(-0.02 / 0.04))
+    assert decision.target_deg[6] - 10 == pytest.approx(5 * scale)
+    assert decision.diagnostics["joint_tracking_scale"][6] == pytest.approx(scale)
     assert decision.target_deg[18] == 80
     assert decision.target_deg[4] == 80  # spread joint not geometrically closing
 
@@ -68,8 +65,7 @@ def test_contact_and_rising_current_decrease_convergence_before_soft_threshold()
         now = 1 + n * 0.02
         result = update(guard, current, now=now, **contact(now))
         steps.append(result.target_deg[6] - 10)
-        assert not np.any(result.limited_mask[16:20])
-    assert steps[-1] < steps[0] / 3
+    assert steps[-1] < steps[0] / 2
     assert result.diagnostics["joint_current_slope_ma_s"][6] > 0
     assert not result.trip
 
@@ -80,7 +76,8 @@ def test_loaded_contact_accepts_large_vr_error_without_retreat():
     for n in range(20):
         now = 1 + n * 0.02
         decision = update(guard, 450, effective, 59, 80, now=now, **contact(now))
-        assert effective <= decision.target_deg[6] <= 61
+        ceiling = max(effective, 59 + decision.diagnostics["joint_lead_budget_deg"][6])
+        assert effective <= decision.target_deg[6] <= ceiling
         effective = decision.target_deg[6]
     assert effective < 65  # Never insists on eventually reaching the blocked 80°.
 
@@ -105,6 +102,56 @@ def test_current_release_is_gradual():
     assert scales[-1] < 1
 
 
+@pytest.mark.parametrize("source", ["contact", "joint_slope", "total_slope"])
+def test_soft_scale_transition_preserves_instant_current_guard(monkeypatch, source):
+    guard = make_guard(nominal_step_deg=4)
+    guard.reset(now=1.0)
+    # Inject the trend output to isolate scale transitions from slope estimation.
+    slope = np.zeros(20)
+    monkeypatch.setattr(guard._trend, "update", lambda *_: slope.copy())
+    if source == "joint_slope":
+        slope[6] = 3500
+    elif source == "total_slope":
+        slope[:] = 250  # 5000 mA/s total; no individual slope above soft.
+    raw_scale = 0.0 if source == "contact" else 0.4
+    previous = 1.0
+    for tick in (1, 2):
+        now = 1 + tick * 0.02
+        decision = update(guard, current=350 if source == "contact" else 0,
+                          effective=10, measured=10, desired=14, now=now,
+                          **(contact(now) if source == "contact" else {}))
+        assert raw_scale < decision.min_scale < previous
+        assert decision.target_deg[6] - 10 == pytest.approx(4 * decision.min_scale)
+        assert not decision.trip
+        previous = decision.min_scale
+    # One attack time constant has elapsed: the transition retains 1/e of its gap.
+    assert previous == pytest.approx(raw_scale + (1 - raw_scale) * np.exp(-1))
+    attack_scale = previous
+    slope.fill(0)
+    for tick in range(3, 8):
+        decision = update(guard, effective=10, measured=10, desired=14, now=1 + tick * 0.02)
+        assert previous < decision.min_scale < 1
+        previous = decision.min_scale
+    assert previous == pytest.approx(1 - (1 - attack_scale) * np.exp(-1))
+
+    # Neither joint nor total hard current may wait for the soft attack filter.
+    joint_hard = update(guard, current=650, effective=10, measured=10, desired=14, now=1.16)
+    assert joint_hard.min_scale == 0
+    assert joint_hard.target_deg[6] == 10
+    assert guard._adaptive_scale[6] > previous  # Emergency must not pollute soft state.
+    currents = np.full(20, 44.0)
+    currents[6], currents[19] = 554, 0  # Actual run's 1346 mA total, 554 mA max.
+    total_hard = guard.update(current_ma=currents, effective_deg=np.full(20, 10),
+                              measured_deg=np.full(20, 9), desired_deg=np.full(20, 14), now=1.18)
+    assert total_hard.total_current_ma == 1346
+    assert total_hard.max_current_ma == 554
+    assert total_hard.min_scale == 0
+    np.testing.assert_array_equal(total_hard.target_deg, np.full(20, 10))
+    assert not total_hard.trip  # Trip still requires the existing hold time.
+    recovered = update(guard, effective=10, measured=10, desired=14, now=1.20)
+    assert recovered.min_scale == pytest.approx(1 - np.exp(-0.02 / 0.20))
+
+
 def test_disappearing_contact_does_not_cause_catchup_jump():
     guard = make_guard()
     shaper = PositionCommandShaper(LOWER_LIMITS_DEG, UPPER_LIMITS_DEG,
@@ -124,7 +171,11 @@ def test_disappearing_contact_does_not_cause_catchup_jump():
             current[6] = 0
         decision = guard.update(current_ma=current, measured_deg=measured,
                                 effective_deg=effective, desired_deg=desired, now=now, **extra)
-        step = shaper.step(decision.target_deg, now=now)
+        lower, upper = np.full(20, -np.inf), np.full(20, np.inf)
+        mask = decision.limited_mask
+        lower[mask] = np.minimum(effective[mask], decision.target_deg[mask])
+        upper[mask] = np.maximum(effective[mask], decision.target_deg[mask])
+        step = shaper.step(decision.target_deg, now=now, command_bounds=(lower, upper))
         assert 0 <= step.output_deg[6] - effective[6] <= 5.000001
         shaper.accept_output(step.output_deg)
         effective = shaper.effective_command()
@@ -149,11 +200,11 @@ def test_spread_only_limited_if_it_reduces_distance():
     assert update(make_guard(), 300, **data).limited_mask[4]
 
 
-def test_adjacent_proximity_without_load_does_not_limit_motion():
+def test_adjacent_contact_has_separate_safety_effect():
     data = contact(pair=5)  # middle-ring; not part of original Hybrid weights
     data["hybrid_weights"] = np.zeros(5)
     decision = update(make_guard(), **data)
-    assert not decision.limited_mask[10] and not decision.limited_mask[14]
+    assert decision.limited_mask[10] and decision.limited_mask[14]
     assert not decision.limited_mask[2]
 
 
@@ -205,6 +256,32 @@ def test_sustained_stall_has_distinct_trip_and_relief_clears_it():
     assert result.stall_trip and not result.trip
     relief = update(guard, 500, 60, 40, 20, now=1.65)
     assert not relief.stall_trip
+
+
+def test_final_bounds_stop_smoothed_inertia_without_reseeding_other_joints():
+    shaper = PositionCommandShaper(np.full(20, -180), np.full(20, 180),
+                                   smoothing=True, filter_tau_s=0, min_send_step_deg=0)
+    shaper.reset(np.full(20, 10), now=1)
+    shaper.velocity_deg_s[:] = 30
+    lower, upper = np.full(20, -np.inf), np.full(20, np.inf)
+    lower[6] = upper[6] = 10
+    step = shaper.step(np.full(20, 80), now=1.02, command_bounds=(lower, upper))
+    assert step.output_deg[6] == 10
+    assert step.output_deg[7] > 10
+    assert step.velocity_deg_s[6] == 0
+
+
+def test_bounds_prevent_arm_blend_from_retreating_loaded_joint():
+    shaper = PositionCommandShaper(np.full(20, -180), np.full(20, 180),
+                                   smoothing=False, min_send_step_deg=0)
+    shaper.reset(np.zeros(20), now=1)
+    shaper.begin_arm_blend(now=1, duration_s=1)
+    shaper.command_pose_deg[6] = shaper.last_sent_pose_deg[6] = 10
+    lower, upper = np.full(20, -np.inf), np.full(20, np.inf)
+    lower[6] = upper[6] = 10
+    step = shaper.step(np.full(20, 10), now=1.2, command_bounds=(lower, upper))
+    assert step.output_deg[6] == 10
+    assert shaper.arm_blend_active
 
 
 def test_urdf_jacobian_matches_finite_difference_and_pinocchio():

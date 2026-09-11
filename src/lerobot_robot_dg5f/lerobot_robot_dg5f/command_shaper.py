@@ -41,7 +41,7 @@ class PositionCommandShaper:
         filter_tau_s: float = 0.05,
         target_deadband_deg: float = 0.20,
         min_send_step_deg: float = 0.20,
-        max_direct_step_deg: float = 5.0,
+        max_direct_step_deg: float = 4.0,
         startup_blend_s: float = 0.70,
         max_dt_s: float = 0.05,
         clock: Callable[[], float] = time.monotonic,
@@ -178,7 +178,8 @@ class PositionCommandShaper:
     def arm_blend_active(self) -> bool:
         return self._blend_origin_deg is not None and self._blend_start_time is not None
 
-    def step(self, target_deg: np.ndarray, now: float | None = None) -> CommandStep:
+    def step(self, target_deg: np.ndarray, now: float | None = None, *,
+             command_bounds: tuple[np.ndarray, np.ndarray] | None = None) -> CommandStep:
         """Advance the internal trajectory and propose the next SDK setpoint."""
         if not self.is_initialized:
             raise RuntimeError("PositionCommandShaper must be reset before use")
@@ -191,6 +192,16 @@ class PositionCommandShaper:
         target = self._validate_pose(target_deg, "Target")
         target = np.clip(target, self.lower_limits_deg, self.upper_limits_deg)
         target = self._apply_disabled(target)
+        bounds = None
+        if command_bounds is not None:
+            lower, upper = (np.asarray(value, dtype=np.float64) for value in command_bounds)
+            if lower.shape != target.shape or upper.shape != target.shape or np.any(np.isnan(lower)) or np.any(np.isnan(upper)):
+                raise ValueError("Invalid current-guard command bounds")
+            lower = np.maximum(lower, self.lower_limits_deg)
+            upper = np.minimum(upper, self.upper_limits_deg)
+            if np.any(lower > upper):
+                raise ValueError("Current-guard bounds conflict with joint limits")
+            bounds = lower, upper
 
         timestamp = self._clock() if now is None else float(now)
         if not np.isfinite(timestamp):
@@ -257,6 +268,15 @@ class PositionCommandShaper:
             )
             self.velocity_deg_s.fill(0.0)
 
+        if bounds is not None:
+            # A loaded joint must not coast through a freeze because of an old
+            # filtered target/velocity. No reset/reseed of the trajectory or ARM
+            # blend; only joints crossing the supplied envelope are affected.
+            constrained = np.clip(self.command_pose_deg, *bounds)
+            hit = constrained != self.command_pose_deg
+            self.command_pose_deg = constrained
+            self.filtered_target_deg[hit] = constrained[hit]
+            self.velocity_deg_s[hit] = 0.0
         self.command_pose_deg = self._apply_disabled(self.command_pose_deg)
         self.velocity_deg_s[list(self.disabled_positions_deg)] = 0.0
 
