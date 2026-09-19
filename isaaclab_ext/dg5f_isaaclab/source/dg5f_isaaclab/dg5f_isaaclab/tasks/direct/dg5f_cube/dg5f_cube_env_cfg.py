@@ -52,7 +52,10 @@ class DG5FCubeEnvCfg(DirectRLEnvCfg):
         physics_material=sim_utils.RigidBodyMaterialCfg(
             static_friction=1.0, dynamic_friction=1.0, restitution=0.0,
         ),
-        physx=PhysxCfg(bounce_threshold_velocity=0.2),
+        # The default rigid patch budget (163840) overflows past ~1024 envs: PhysX then drops
+        # contact patches, which silently changes the finger/cube contacts this task depends on
+        # (logs/scaling/probe_1024.log asked for 165827). 4x the default keeps headroom.
+        physx=PhysxCfg(bounce_threshold_velocity=0.2, gpu_max_rigid_patch_count=655360),
     )
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=128, env_spacing=0.75, replicate_physics=True, clone_in_fabric=False,
