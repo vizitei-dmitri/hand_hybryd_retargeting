@@ -14,22 +14,26 @@ dg5f_lerobot_bridge:
     ip: 169.254.186.72
     port: 502
     slave_id: 1
-    command_rate_hz: 50.0
+    control_mode: legacy  # legacy path and defaults are preserved
+    servo_rate_hz: 60.0
+    servo_max_velocity_deg_s: 120.0
+    command_rate_hz: 50.0  # legacy only
     state_rate_hz: 30.0
     command_timeout: 0.35
     tracking_timeout: 0.35
-    # After an already-armed hand loses Quest tracking, keep the physical hand
+    # LEGACY ONLY: after an already-armed hand loses Quest tracking, keep the physical hand
     # at the last accepted pose for up to 15 s. If tracking returns in time,
     # resume automatically through a smooth catch-up blend; no new ARM needed.
     tracking_grace_s: 15.0
     tracking_resume_blend_s: 1.0
-    # Manual ARM and automatic resume both reseed once from fresh physical pose.
+    # Servo instead holds indefinitely and resumes persistent q_cmd without reseeding.
+    # Manual ARM (and legacy auto-resume) seeds once from fresh physical pose.
     arm_pose_max_age_ms: 100.0
     # Adaptive software load guard. This is an EXTRA envelope above the normal
     # Tesollo/DGSDK/firmware protections; it does not disable or replace them.
     # Thresholds are conservative empirical values from our debug runs, not
-    # Tesollo's published absolute motor limits. The latest reset happened near
-    # 1.2-1.27 A total, so total-load limiting now starts substantially earlier.
+    # Tesollo's published absolute motor limits. In SERVO, joint load is handled
+    # locally; total thresholds and trip/stall are diagnostics, never global DISARM.
     current_guard_enabled: true
     current_guard_soft_ma: 350.0
     current_guard_hard_ma: 650.0
@@ -41,7 +45,8 @@ dg5f_lerobot_bridge:
     # Restriction attacks immediately but releases over 0.2 s to avoid chatter.
     current_guard_release_tau_s: 0.20
     # Virtual compliance changes reference motion, never Tesollo gains/lifecycle.
-    # Existing joint/total emergency thresholds above are deliberately unchanged.
+    # Legacy emergency behavior remains unchanged; servo applies the same lead
+    # budget to physical output, separately from persistent trajectory q_cmd.
     compliance_enabled: true
     # Smooth only contact + dI/dt tracking gain; current guard still attacks instantly.
     compliance_attack_tau_s: 0.04
@@ -64,7 +69,7 @@ dg5f_lerobot_bridge:
     compliance_thumb_contact_full_m: 0.025
     compliance_adjacent_contact_start_m: 0.025
     compliance_adjacent_contact_full_m: 0.010
-    # Additional sustained-stall backstop; does not replace fast current trip.
+    # Sustained-stall diagnostic in servo; legacy retains emergency disarm.
     compliance_stall_enabled: true
     compliance_stall_current_ma: 350.0
     compliance_stall_error_deg: 8.0

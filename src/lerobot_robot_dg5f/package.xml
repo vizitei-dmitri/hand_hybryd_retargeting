@@ -10,7 +10,10 @@
   <buildtool_depend>ament_python</buildtool_depend>
 
   <depend>rclpy</depend>
+  <depend>rcl_interfaces</depend>
   <depend>diagnostic_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>vr_haptic_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>

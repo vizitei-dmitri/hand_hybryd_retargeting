@@ -52,12 +52,14 @@ Commands:
                  Mirror the authorized Quest display to this PC
   topics         List ROS topics
   record [name]  Record Quest, normalized landmarks and DG5F state
-  debug-record [--ping] [--tcpdump]
+  debug-record [--ping] [--tcpdump] [--teleop]
                  Passively record DG5F/ROS/network diagnostics (no control)
   debug-mark LABEL
                  Add an event marker to the active passive recording
   debug-record-network
                  ROS recorder + host ping, tcpdump and link counters
+  debug-record-teleop [--no-adb]
+                 One bundle: hand inputs, servo ticks, ROS logs, Quest logcat
   dg-status      Read current ROS diagnostics; no SDK connection
   dataset-record REPO_ID "TASK" [--fps 30] [--cameras YAML] [--resume]
                  Passive local LeRobotDataset recorder; never connects to DGSDK
@@ -170,7 +172,7 @@ case "${1:-help}" in
       viewer=false
     fi
     "${compose[@]}" exec "${service}" bash -lc \
-      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} lerobot_control_smoothing:=${DG5F_CONTROL_SMOOTHING:-false} lerobot_max_direct_step_deg:=${DG5F_MAX_DIRECT_STEP_DEG:-4.0} lerobot_startup_blend_s:=${DG5F_STARTUP_BLEND_S:-0.70} max_joint_velocity:=${DG5F_MAX_JOINT_VELOCITY:-0.0} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
+      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} control_mode:=${DG5F_CONTROL_MODE:-legacy} servo_rate_hz:=${DG5F_SERVO_RATE_HZ:-60.0} servo_max_velocity_deg_s:=${DG5F_SERVO_MAX_SPEED_DEG_S:-${DG5F_SERVO_MAX_VELOCITY_DEG_S:-120.0}} lerobot_control_smoothing:=${DG5F_CONTROL_SMOOTHING:-false} lerobot_max_direct_step_deg:=${DG5F_MAX_DIRECT_STEP_DEG:-4.0} lerobot_startup_blend_s:=${DG5F_STARTUP_BLEND_S:-0.70} max_joint_velocity:=${DG5F_MAX_JOINT_VELOCITY:-0.0} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
     ;;
   hardware|hardware-headless)
     require_container
@@ -186,7 +188,7 @@ case "${1:-help}" in
     echo "Starting REAL Tesollo backend at ${hand_ip}:502 in DISARMED state."
     echo "After checking tracking and MuJoCo, use: bash scripts/stack.sh arm"
     "${compose[@]}" exec "${service}" bash -lc \
-      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} lerobot_backend:=tesollo lerobot_auto_enable:=false lerobot_ip:=${hand_ip} lerobot_control_smoothing:=${DG5F_CONTROL_SMOOTHING:-false} lerobot_max_direct_step_deg:=${DG5F_MAX_DIRECT_STEP_DEG:-4.0} lerobot_startup_blend_s:=${DG5F_STARTUP_BLEND_S:-0.70} max_joint_velocity:=${DG5F_MAX_JOINT_VELOCITY:-0.0} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
+      "${source_workspace}; ros2 launch dg5f_unity_teleop unity_dg5f.launch.py mujoco_viewer:=${viewer} tcp_port:=${tcp_port} retarget_config:=${retarget_config} lerobot_backend:=tesollo lerobot_auto_enable:=false lerobot_ip:=${hand_ip} control_mode:=${DG5F_CONTROL_MODE:-legacy} servo_rate_hz:=${DG5F_SERVO_RATE_HZ:-60.0} servo_max_velocity_deg_s:=${DG5F_SERVO_MAX_SPEED_DEG_S:-${DG5F_SERVO_MAX_VELOCITY_DEG_S:-120.0}} lerobot_control_smoothing:=${DG5F_CONTROL_SMOOTHING:-false} lerobot_max_direct_step_deg:=${DG5F_MAX_DIRECT_STEP_DEG:-4.0} lerobot_startup_blend_s:=${DG5F_STARTUP_BLEND_S:-0.70} max_joint_velocity:=${DG5F_MAX_JOINT_VELOCITY:-0.0} mujoco_actuator_kp:=${DG5F_MUJOCO_KP:-40.0} mujoco_actuator_kd:=${DG5F_MUJOCO_KD:-0.5} mujoco_self_collision:=${DG5F_MUJOCO_SELF_COLLISION:-tip_only}"
     ;;
   arm|disarm)
     require_container
@@ -279,7 +281,7 @@ case "${1:-help}" in
     "${compose[@]}" exec "${service}" bash -lc \
       "${source_workspace}; ros2 bag record -o /workspace/bags/${bag_name} --storage mcap /quest/hand_pose /quest/hand_points /quest/hand_gesture /hands/right/landmarks /dg5f/joint_command /dg5f/target_joint_states /dg5f/joint_states /dg5f/tracking_ok /dg5f/lerobot/joint_states /dg5f/lerobot/commanded_joint_states /dg5f/lerobot/temperatures /dg5f/lerobot/connected /dg5f/lerobot/armed /dg5f/lerobot/diagnostics /dg5f/debug_marker /tf"
     ;;
-  debug-record|debug-record-network)
+  debug-record|debug-record-network|debug-record-teleop)
     require_container
     hand_ip="${DG5F_HAND_IP:-169.254.186.72}"
     network_interface="${DG5F_NETWORK_INTERFACE:-enp49s0}"
@@ -287,11 +289,14 @@ case "${1:-help}" in
     if [[ "$1" == debug-record-network ]]; then
       extra_args=(--ping --tcpdump)
     fi
+    if [[ "$1" == debug-record-teleop ]]; then
+      extra_args+=(--teleop)
+    fi
     for option in "${@:2}"; do
       case "${option}" in
-        --ping|--tcpdump) extra_args+=("${option}") ;;
+        --ping|--tcpdump|--teleop|--no-adb) extra_args+=("${option}") ;;
         *)
-          echo "debug-record accepts only --ping and --tcpdump." >&2
+          echo "debug-record accepts --ping, --tcpdump, --teleop and --no-adb." >&2
           exit 2
           ;;
       esac

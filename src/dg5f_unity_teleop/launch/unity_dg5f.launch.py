@@ -33,6 +33,9 @@ def generate_launch_description() -> LaunchDescription:
                 "lerobot_max_relative_target_deg", default_value="7.0"
             ),
             DeclareLaunchArgument("max_joint_velocity", default_value="0.0"),
+            DeclareLaunchArgument("control_mode", default_value="legacy"),
+            DeclareLaunchArgument("servo_rate_hz", default_value="60.0"),
+            DeclareLaunchArgument("servo_max_velocity_deg_s", default_value="120.0"),
             DeclareLaunchArgument("lerobot_control_smoothing", default_value="false"),
             DeclareLaunchArgument("lerobot_max_direct_step_deg", default_value="4.0"),
             DeclareLaunchArgument("lerobot_startup_blend_s", default_value="0.70"),
@@ -147,6 +150,15 @@ def generate_launch_description() -> LaunchDescription:
                         "backend": ParameterValue(
                             LaunchConfiguration("lerobot_backend"),
                             value_type=str,
+                        ),
+                        "control_mode": ParameterValue(
+                            LaunchConfiguration("control_mode"), value_type=str,
+                        ),
+                        "servo_rate_hz": ParameterValue(
+                            LaunchConfiguration("servo_rate_hz"), value_type=float,
+                        ),
+                        "servo_max_velocity_deg_s": ParameterValue(
+                            LaunchConfiguration("servo_max_velocity_deg_s"), value_type=float,
                         ),
                         "control_smoothing": ParameterValue(
                             LaunchConfiguration("lerobot_control_smoothing"), value_type=bool,

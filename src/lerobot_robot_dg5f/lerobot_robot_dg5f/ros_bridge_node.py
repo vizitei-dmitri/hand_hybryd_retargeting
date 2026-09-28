@@ -7,8 +7,12 @@ from typing import Optional
 
 import numpy as np
 import rclpy
+from geometry_msgs.msg import PoseArray
+from vr_haptic_msgs.msg import ManoLandmarks
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.task import Future
 from rclpy.callback_groups import ReentrantCallbackGroup
 from sensor_msgs.msg import JointState
@@ -24,6 +28,8 @@ from .contact_kinematics import ContactKinematics
 from dg5f_teleop.contact_signals import decode_contact_packet, PAIR_NAMES, FINGERS
 from .dg5f import Dg5f
 from .health import age_ms, disarm_reason
+from .tracking_diagnostics import TrackingDiagnostics
+from .servo_controller import GuardedServoCommand
 
 
 def trajectory_to_degrees(message: JointTrajectory) -> np.ndarray:
@@ -62,6 +68,8 @@ class Dg5fLeRobotBridge(Node):
 
         self.declare_parameter("command_topic", "/dg5f/joint_command")
         self.declare_parameter("tracking_topic", "/dg5f/tracking_ok")
+        self.declare_parameter("landmarks_topic", "/hands/right/landmarks")
+        self.declare_parameter("quest_hand_topic", "/quest/hand_pose")
         self.declare_parameter("joint_state_topic", "/dg5f/lerobot/joint_states")
         self.declare_parameter(
             "commanded_state_topic", "/dg5f/lerobot/commanded_joint_states"
@@ -78,6 +86,9 @@ class Dg5fLeRobotBridge(Node):
         self.declare_parameter("ip", "169.254.186.72")
         self.declare_parameter("port", 502)
         self.declare_parameter("slave_id", 1)
+        self.declare_parameter("control_mode", "legacy")
+        self.declare_parameter("servo_rate_hz", 60.0)
+        self.declare_parameter("servo_max_velocity_deg_s", 120.0)
         self.declare_parameter("command_rate_hz", 50.0)
         self.declare_parameter("state_rate_hz", 30.0)
         self.declare_parameter("command_timeout", 0.35)
@@ -148,6 +159,9 @@ class Dg5fLeRobotBridge(Node):
         config = Dg5fConfig(
             id="dg5f_ros_bridge",
             backend=backend,
+            control_mode=str(self.get_parameter("control_mode").value),
+            servo_rate_hz=float(self.get_parameter("servo_rate_hz").value),
+            servo_max_velocity_deg_s=float(self.get_parameter("servo_max_velocity_deg_s").value),
             ip=str(self.get_parameter("ip").value),
             port=int(self.get_parameter("port").value),
             slave_id=int(self.get_parameter("slave_id").value),
@@ -188,6 +202,7 @@ class Dg5fLeRobotBridge(Node):
             ),
             disabled_joint_positions_deg=disabled_map,
         )
+        self._control_mode = config.control_mode
         self._robot = Dg5f(config)
         self._robot.connect(calibrate=False)
 
@@ -195,10 +210,15 @@ class Dg5fLeRobotBridge(Node):
         self._tracking_ok = not bool(
             self.get_parameter("require_tracking").value
         )
+        self._tracking_diagnostics = TrackingDiagnostics()
         self._latest_command_deg: Optional[np.ndarray] = None
         self._last_command_time: Optional[float] = None
         self._last_tracking_time: Optional[float] = None
         self._disarm_reason = "NONE"
+        self._sdk_block_reason = None
+        self._load_threshold_active = False
+        self._last_retarget_time = None
+        self._last_hold_tick_time = None
         self._recovery_state = "IDLE"
         self._recovery_pending = False
         self._arm_pending = False
@@ -245,9 +265,9 @@ class Dg5fLeRobotBridge(Node):
             release_tau_s=float(
                 self.get_parameter("current_guard_release_tau_s").value
             ),
-            nominal_step_deg=max(
-                1e-6, float(self.get_parameter("max_direct_step_deg").value)
-            ),
+            nominal_step_deg=(config.servo_max_velocity_deg_s / config.servo_rate_hz
+                              if self._control_mode == "servo" else max(
+                                  1e-6, float(self.get_parameter("max_direct_step_deg").value))),
             compliance=compliance,
             object_contact=ObjectContactConfig(**{
                 name: self.get_parameter(f"object_contact_{name}").value
@@ -284,6 +304,8 @@ class Dg5fLeRobotBridge(Node):
             str(self.get_parameter("diagnostics_topic").value),
             5,
         )
+        self._servo_pub = (self.create_publisher(String, "/dg5f/lerobot/servo_state", 10)
+                           if self._control_mode == "servo" else None)
         self._events_pub = self.create_publisher(String, "/dg5f/lerobot/events", 100)
         self._command_sub = self.create_subscription(
             JointTrajectory,
@@ -291,6 +313,11 @@ class Dg5fLeRobotBridge(Node):
             self._on_command,
             1,
         )
+        # Passive observers only: no change to MANO conversion or retargeting.
+        self.create_subscription(PoseArray, str(self.get_parameter("landmarks_topic").value),
+                                 lambda msg: self._observe_tracking_input("landmarks", msg), qos_profile_sensor_data)
+        self.create_subscription(ManoLandmarks, str(self.get_parameter("quest_hand_topic").value),
+                                 lambda msg: self._observe_tracking_input("quest", msg), qos_profile_sensor_data)
         self._tracking_sub = self.create_subscription(
             Bool,
             str(self.get_parameter("tracking_topic").value),
@@ -319,11 +346,17 @@ class Dg5fLeRobotBridge(Node):
         state_hz = float(self.get_parameter("state_rate_hz").value)
         if command_hz <= 0.0 or state_hz <= 0.0:
             raise ValueError("command_rate_hz and state_rate_hz must be positive")
-        self._command_timer = self.create_timer(1.0 / command_hz, self._send_latest)
+        if self._control_mode == "servo":
+            # A steady-clock timer is independent of Quest callbacks and /clock.
+            self._servo_clock = Clock(clock_type=ClockType.STEADY_TIME)
+            self._command_timer = self.create_timer(
+                1.0 / config.servo_rate_hz, self._send_latest, clock=self._servo_clock)
+        else:
+            self._command_timer = self.create_timer(1.0 / command_hz, self._send_latest)
         self._state_timer = self.create_timer(1.0 / state_hz, self._publish_state)
 
         self.get_logger().info(
-            f"LeRobot DG5F connected: backend={backend}, armed={self._armed}, "
+            f"LeRobot DG5F connected: backend={backend}, control_mode={self._control_mode}, armed={self._armed}, "
             f"disabled={disabled_map}"
         )
 
@@ -360,6 +393,11 @@ class Dg5fLeRobotBridge(Node):
         # keepalive: during the grace window the physical hand holds the last
         # accepted setpoint and no new VR command is forwarded.
         self._robot.pause_trajectory()
+        if self._control_mode == "servo":
+            self._last_hold_tick_time = None
+            self._event("TRACKING_LOST", reason=self._input_failure(), runtime_state="TRACKING_HOLD")
+            self._warn_throttled("Tracking lost: holding last command until fresh tracking and target return")
+            return
         grace_s = float(self.get_parameter("tracking_grace_s").value)
         self._event("TRACKING_GRACE_STARTED", grace_s=grace_s)
         self._warn_throttled(
@@ -367,6 +405,8 @@ class Dg5fLeRobotBridge(Node):
         )
 
     def _expire_tracking_grace(self) -> None:
+        if self._control_mode == "servo":
+            return  # Indefinite TRACKING_HOLD; legacy alone has a grace deadline.
         if not self._tracking_grace_active:
             return
         self._event("TRACKING_GRACE_EXPIRED")
@@ -382,7 +422,7 @@ class Dg5fLeRobotBridge(Node):
             return
         grace_s = float(self.get_parameter("tracking_grace_s").value)
         elapsed = self._tracking_grace_elapsed(now)
-        if elapsed > grace_s:
+        if elapsed > grace_s and self._control_mode != "servo":
             self._expire_tracking_grace()
             return
         if not command_is_fresh(
@@ -391,6 +431,15 @@ class Dg5fLeRobotBridge(Node):
             float(self.get_parameter("command_timeout").value),
         ):
             return
+
+        if self._control_mode == "servo":
+            if self._last_command_time <= self._tracking_grace_started or self._sdk_block_reason:
+                return
+            self._tracking_grace_active = False
+            self._tracking_grace_started = None
+            self._resume_waiting_for_fresh_command = False
+            self._event("TRACKING_RECOVERED", hold_elapsed_s=elapsed, runtime_state="ACTIVE")
+            return  # Keep q_cmd, physical command and contact anchors intact.
 
         # Re-anchor exactly once to current physical feedback. This prevents a
         # stale pre-loss command from becoming the origin of the catch-up.
@@ -451,13 +500,13 @@ class Dg5fLeRobotBridge(Node):
         }
 
     def _guard_current_target(
-        self, desired_deg: np.ndarray, now: float
-    ) -> Optional[np.ndarray]:
-        """Return a current-limited target, or ``None`` after emergency disarm.
+        self, desired_deg: np.ndarray, now: float, *, operator_target_deg=None
+    ) -> Optional[np.ndarray | GuardedServoCommand]:
+        """Return local servo bounds, or the unchanged legacy guard decision.
 
         Low steady current without contact leaves the target unchanged. Contact
         and rising current can pre-emptively reduce convergence. Relief bypasses
-        the adaptive limiter, not the underlying shaper/emergency protection.
+        the adaptive limiter. Only legacy converts trip/stall into DISARM.
         """
         self._command_bounds = None
         if not bool(self.get_parameter("current_guard_enabled").value):
@@ -480,13 +529,16 @@ class Dg5fLeRobotBridge(Node):
             # actually missing. Do not fabricate load information here.
             return np.asarray(desired_deg, dtype=np.float64).copy()
 
-        effective = self._robot.command_shaper.effective_command()
+        effective = (self._robot.command_shaper.command_pose_deg.copy()
+                     if self._control_mode == "servo" else
+                     self._robot.command_shaper.effective_command())
         decision = self._current_guard.update(
             current_ma=current,
             measured_deg=measured,
             effective_deg=effective,
             desired_deg=np.asarray(desired_deg, dtype=np.float64),
             now=now,
+            operator_target_deg=operator_target_deg,
             **self._contact_for_guard(effective, now),
         )
         self._last_compliance_time = now
@@ -494,6 +546,8 @@ class Dg5fLeRobotBridge(Node):
         for transition in decision.object_contact_events:
             details = dict(transition)
             event = details.pop("event")
+            if self._control_mode == "servo":
+                event = event.removeprefix("OBJECT_")
             self._event(event, **details)
         if decision.active:
             lower, upper = np.full(20, -np.inf), np.full(20, np.inf)
@@ -533,6 +587,18 @@ class Dg5fLeRobotBridge(Node):
             self._event("CURRENT_GUARD_RELEASED")
         self._current_guard_active = decision.active
 
+        if self._control_mode == "servo":
+            threshold = decision.trip or decision.stall_trip
+            if threshold and not self._load_threshold_active:
+                self._event("CURRENT_LOAD_THRESHOLD", current_threshold=decision.trip,
+                            stall_threshold=decision.stall_trip,
+                            max_current_ma=decision.max_current_ma,
+                            total_current_ma=decision.total_current_ma)
+            self._load_threshold_active = threshold
+            return GuardedServoCommand(decision.target_deg,
+                                       decision.diagnostics["physical_lower_deg"],
+                                       decision.diagnostics["physical_upper_deg"])
+
         if decision.trip or decision.stall_trip:
             event = "CURRENT_GUARD_TRIP" if decision.trip else "STALL_GUARD_TRIP"
             reason = "OVERCURRENT_GUARD" if decision.trip else "STALL_GUARD"
@@ -555,8 +621,15 @@ class Dg5fLeRobotBridge(Node):
 
     def _on_command(self, message: JointTrajectory) -> None:
         try:
-            self._latest_command_deg = trajectory_to_degrees(message)
+            command = trajectory_to_degrees(message)
             now = self._now_seconds()
+            self._last_retarget_time = now
+            if self._control_mode == "servo" and self._armed:
+                if not self._tracking_is_fresh(now) or self._sdk_block_reason:
+                    return  # Observe receipt, but never accept lost-tracking targets.
+                if self._tracking_grace_active:
+                    self._resume_waiting_for_fresh_command = True
+            self._latest_command_deg = command
             self._last_command_time = now
             if self._resume_waiting_for_fresh_command:
                 try:
@@ -565,6 +638,12 @@ class Dg5fLeRobotBridge(Node):
                     self._warn_throttled(f"Auto-resume waiting for safe pose: {error}")
         except ValueError as error:
             self._warn_throttled(f"Ignoring unsafe DG5F command: {error}")
+
+    def _observe_tracking_input(self, name, message):
+        points = message.landmarks if name == "quest" else [pose.position for pose in message.poses]
+        stamp = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
+        self._tracking_diagnostics.observe(
+            name, [[point.x, point.y, point.z] for point in points], stamp, self._now_seconds())
 
     def _on_tracking(self, message: Bool) -> None:
         now = self._now_seconds()
@@ -580,7 +659,7 @@ class Dg5fLeRobotBridge(Node):
 
         if self._tracking_grace_active:
             grace_s = float(self.get_parameter("tracking_grace_s").value)
-            if self._tracking_grace_elapsed(now) > grace_s:
+            if self._tracking_grace_elapsed(now) > grace_s and self._control_mode != "servo":
                 self._expire_tracking_grace()
                 return
             # Grace may have started either from an explicit tracking=false or
@@ -620,11 +699,11 @@ class Dg5fLeRobotBridge(Node):
         return None
 
     async def _on_enable(self, request: SetBool.Request, response: SetBool.Response):
-        """Enable/disable output. ARM is a strictly passive preflight.
+        """Enable/disable output after a passive hardware preflight.
 
-        In particular ARM must never call DGSDK recovery, SystemStart,
-        SystemStop or MoveServoJoint. Faulted sessions are handled only by the
-        explicit ``/dg5f/lerobot/recover`` service.
+        Servo ARM seeds the backend hold setpoint from measured feedback once;
+        tracking only selects ACTIVE versus TRACKING_HOLD. Legacy ARM remains
+        passive. Neither path recovers or restarts the SDK session.
         """
         if not request.data:
             self._arm_epoch += 1
@@ -633,6 +712,9 @@ class Dg5fLeRobotBridge(Node):
             return response
 
         self._event("ARM_REQUESTED")
+        if self._control_mode == "servo" and self._sdk_block_reason:
+            response.success, response.message = False, f"ARM FAILED: explicit recovery required ({self._sdk_block_reason})"
+            return response
         if self._recovery_pending:
             response.success, response.message = False, "ARM FAILED: explicit recovery is running"
             self.get_logger().warning(response.message)
@@ -647,19 +729,21 @@ class Dg5fLeRobotBridge(Node):
 
         self._arm_pending = True
         try:
-            failure = self._input_failure()
-            if failure:
-                raise RuntimeError(failure)
-            if self._latest_command_deg is None:
-                raise RuntimeError("COMMAND_TIMEOUT")
+            if self._control_mode != "servo":
+                failure = self._input_failure()
+                if failure:
+                    raise RuntimeError(failure)
+                if self._latest_command_deg is None:
+                    raise RuntimeError("COMMAND_TIMEOUT")
 
             # PASSIVE ONLY: prepare_arm reads status and validates it. It may
             # not reconnect/restart or send any hardware command.
             self._robot.prepare_arm()
 
-            failure = self._input_failure()
-            if failure:
-                raise RuntimeError(failure)
+            if self._control_mode != "servo":
+                failure = self._input_failure()
+                if failure:
+                    raise RuntimeError(failure)
             status = self._robot.get_diagnostics()
             failure = disarm_reason(status)
             if failure != "NONE":
@@ -667,13 +751,24 @@ class Dg5fLeRobotBridge(Node):
 
             # Re-anchor the shaper ONCE from the freshest physical pose. This
             # prevents a stale pre-arm command_pose from producing a large
-            # first setpoint. No hardware command is sent until ARMED becomes
-            # true and the normal 50 Hz timer advances the blend.
+            # first setpoint. Servo also initializes the physical hold setpoint;
+            # subsequent live targets go through the normal servo timer.
             pose = self._robot.begin_arm_blend_from_feedback(
                 max_pose_age_ms=float(self.get_parameter("arm_pose_max_age_ms").value),
                 duration_s=float(self.get_parameter("startup_blend_s").value),
             )
-            target_offset = float(np.max(np.abs(self._latest_command_deg - pose)))
+            tracking_hold = self._control_mode == "servo" and (
+                self._input_failure() is not None or self._latest_command_deg is None)
+            if self._control_mode == "servo":
+                if tracking_hold:
+                    # Discard pre-arm stale intent. A new valid target received
+                    # with fresh tracking is required to leave HOLD.
+                    self._latest_command_deg = None
+                    self._last_command_time = None
+                self._robot.backend.send_positions(
+                    self._robot.command_shaper.effective_command())
+            target_offset = (None if self._latest_command_deg is None else
+                             float(np.max(np.abs(self._latest_command_deg - pose))))
             self._tracking_grace_active = False
             self._tracking_grace_started = None
             self._resume_waiting_for_fresh_command = False
@@ -684,7 +779,12 @@ class Dg5fLeRobotBridge(Node):
             self._disarm_reason = "NONE"
             self._armed = True
             self._event("ARMED", max_target_offset_deg=target_offset)
-            response.success, response.message = True, "DG5F output enabled (passive preflight OK)"
+            if tracking_hold:
+                self._enter_tracking_grace(self._now_seconds())
+            response.success = True
+            response.message = (f"DG5F output enabled ({self._runtime_state()})"
+                                if self._control_mode == "servo" else
+                                "DG5F output enabled (passive preflight OK)")
         except Exception as error:
             self._armed = False
             self._disarm_reason = str(error)
@@ -716,8 +816,8 @@ class Dg5fLeRobotBridge(Node):
         self._recovery_state = "STARTED"
         self._event("RECOVERY_STARTED")
 
-        # Never let a pre-fault command execute after recovery. A new live
-        # target must arrive before the user can ARM again.
+        # Never let a pre-fault command execute after recovery. Servo may ARM
+        # into HOLD; legacy still requires a new live target before ARM.
         self._latest_command_deg = None
         self._last_command_time = None
         self._robot.hold_position()
@@ -740,6 +840,7 @@ class Dg5fLeRobotBridge(Node):
                 raise RuntimeError(str(status.get("motion_ready_reason", "SDK_NOT_MOTION_READY")))
 
             self._recovery_state = "SUCCEEDED"
+            self._sdk_block_reason = None
             self._current_guard.reset(self._now_seconds())
             self._current_guard_active = False
             self._disarm_reason = "RECOVERY_REQUIRED_ARM"
@@ -747,7 +848,9 @@ class Dg5fLeRobotBridge(Node):
             response.success = True
             response.message = (
                 "DG5F recovery succeeded; output remains DISARMED. "
-                "Wait for a fresh Quest command, then run arm."
+                + ("Run arm; fresh tracking will resume motion automatically."
+                   if self._control_mode == "servo" else
+                   "Wait for a fresh Quest command, then run arm.")
             )
         except Exception as error:
             self._recovery_state = "FAILED"
@@ -763,9 +866,25 @@ class Dg5fLeRobotBridge(Node):
         return response
 
     def _send_latest(self) -> None:
-        if not self._armed or self._latest_command_deg is None:
+        if not self._armed:
             return
         now = self._now_seconds()
+
+        if self._control_mode == "servo":
+            if self._sdk_block_reason:
+                self._publish_servo_hold(now)
+                return
+            failure = self._input_failure()
+            if failure or self._latest_command_deg is None:
+                self._enter_tracking_grace(now)
+            if self._tracking_grace_active:
+                self._publish_servo_hold(now)
+                return
+            self._send_servo_tick(now)
+            return
+
+        if self._latest_command_deg is None:
+            return
 
         if bool(self.get_parameter("require_tracking").value):
             if not self._tracking_is_fresh(now):
@@ -806,6 +925,155 @@ class Dg5fLeRobotBridge(Node):
             return
         self._publish_commanded_state(sent)
 
+    def _send_servo_tick(self, now: float) -> None:
+        try:
+            # Snapshot is read for logging only; it never seeds an ordinary tick.
+            measured = self._robot.get_diagnostics()["measured_pos"]
+            target = self._latest_command_deg.copy()
+            controller = self._robot.command_shaper
+            operator_target = controller._apply_disabled(np.clip(
+                target, controller.lower_limits_deg, controller.upper_limits_deg))
+            sent = self._robot.servo_tick(
+                target, now=now,
+                guard=lambda proposed: self._guard_current_target(
+                    proposed, now, operator_target_deg=operator_target),
+            )
+            if sent is None:
+                return
+            controller = self._robot.command_shaper
+            warning_joints = controller.observe(measured)
+            if warning_joints:
+                self.get_logger().warning(
+                    "Servo tracking error >10 deg for >=300 ms: "
+                    + ", ".join(JOINT_NAMES[index] for index in warning_joints))
+            telemetry = controller.telemetry
+            telemetry["command_submitted"] = True
+            for key in ("post_compliance_cmd", "post_contact_cmd", "post_guard_cmd"):
+                telemetry[key] = np.asarray(self._compliance_diagnostics.get(
+                    key, telemetry["q_proposed"])).tolist()
+            telemetry["command_direction_reason"] = self._compliance_diagnostics.get(
+                "command_direction_reason", ["NONE"] * len(JOINT_NAMES))
+            # This is an asynchronous SDK snapshot, not an acknowledgement of
+            # this very tick. Keep submitted and observed commands distinct.
+            status = self._robot.get_diagnostics()
+            low_level = status.get("latest_command_deg")
+            telemetry["low_level_cmd"] = None if low_level is None else np.asarray(low_level).tolist()
+            telemetry["low_level_valid"] = bool(status.get("latest_command_valid", False))
+            telemetry["low_level_sample_monotonic_s"] = self._now_seconds()
+            telemetry["measured"] = telemetry["q_measured"]
+            self._enrich_servo_telemetry(telemetry, status, now)
+            self._log_servo_direction(telemetry)
+            self._servo_pub.publish(String(data=json.dumps(telemetry)))
+            self._publish_commanded_state(sent)
+        except Exception as error:
+            try:
+                reason = disarm_reason(self._robot.get_diagnostics())
+            except Exception:
+                reason = "INTERNAL_ERROR"
+            self._block_servo_backend(reason if reason != "NONE" else "COMMAND_PIPELINE_ERROR", error=str(error))
+
+    def _runtime_state(self):
+        if self._sdk_block_reason:
+            return "SDK_ERROR"
+        if not self._armed:
+            return "DISARMED"
+        return "TRACKING_HOLD" if self._tracking_grace_active else "ACTIVE"
+
+    def _block_servo_backend(self, reason, *, error=None, diagnostics=None):
+        """Latch backend inhibition without changing initial ARM authorization.
+
+        No reconnect/reset/rearm here. Only successful explicit recovery clears
+        this latch. Backend readiness faults may include wrapper health gates;
+        they are not necessarily device-reported faults.
+        """
+        if self._sdk_block_reason:
+            return
+        self._sdk_block_reason = reason
+        if diagnostics is None:
+            try:
+                diagnostics = self._robot.get_diagnostics()
+            except Exception as read_error:
+                diagnostics = {"diagnostics_error": str(read_error)}
+        details = {key: diagnostics.get(key) for key in (
+            "last_motion_result", "motion_ready_reason", "transport_connected",
+            "control_thread_alive", "telemetry_valid", "temperature_safe",
+            "system_started", "data_processing_status", "diagnostics_error",
+            "diagnosis_process", "diagnosis_step", "diagnosis_joint_id",
+            "diagnosis_period", "diagnosis_joint", "diagnosis_temperature")}
+        self._event("SDK_ERROR", reason=reason, error=error, **details)
+        self.get_logger().error(f"SDK_ERROR: backend inhibited; reason={reason}, error={error}, status={details}")
+        try:
+            self._robot.hold_position()
+        except Exception as suspend_error:
+            self.get_logger().error(f"SDK_ERROR: suspend failed: {suspend_error}")
+
+    def _enrich_servo_telemetry(self, telemetry, status, now):
+        for key, value in self._compliance_diagnostics.items():
+            if key not in telemetry:
+                telemetry[key] = value.tolist() if isinstance(value, np.ndarray) else value
+        telemetry.update(self._tracking_diagnostics.snapshot(
+            now=now, retarget_time=self._last_retarget_time,
+            tracking_ok=self._tracking_ok, tracking_time=self._last_tracking_time,
+            timeout=float(self.get_parameter("tracking_timeout").value)))
+        telemetry["runtime_state"] = self._runtime_state()
+        telemetry["compliance_age_ms"] = age_ms(self._last_compliance_time, now)
+        telemetry["sdk_block_reason"] = self._sdk_block_reason
+        current = np.asarray(status.get("measured_current", np.full(20, np.nan)))
+        telemetry["current_ma"] = current.tolist()
+        telemetry["total_current_ma"] = float(np.sum(np.abs(current)))
+        measured = np.asarray(telemetry["q_measured"])
+        physical = np.asarray(telemetry.get("low_level_submitted", self._robot.command_shaper.effective_command()))
+        telemetry["submitted_command_lead_deg"] = (physical - measured).tolist()
+        actual = telemetry.get("low_level_cmd")
+        telemetry["actual_command_lead_deg"] = (
+            (np.asarray(actual) - measured).tolist()
+            if actual is not None and telemetry.get("low_level_valid") else None)
+        telemetry.setdefault("physical_limit_reason", ["HOLD_LAST_COMMAND"] * 20)
+
+    def _publish_servo_hold(self, now):
+        """Continue the diagnostic clock while SDK keepalive holds the pose."""
+        try:
+            status = self._robot.get_diagnostics()
+            controller = self._robot.command_shaper
+            command = controller.command_pose_deg.tolist()
+            measured = np.asarray(status.get("measured_pos", np.full(20, np.nan)))
+            dt = 1 / controller.rate_hz if self._last_hold_tick_time is None else now - self._last_hold_tick_time
+            self._last_hold_tick_time = now
+            telemetry = dict(source_monotonic_s=now, command_submitted=False,
+                q_target=(self._latest_command_deg.tolist() if self._latest_command_deg is not None
+                          else [float("nan")] * 20), previous_q_cmd=command,
+                q_cmd=command, q_measured=measured.tolist(), raw_servo_step=[0.0] * 20,
+                post_contact_cmd=command, post_guard_cmd=command,
+                tracking_error=np.abs(np.asarray(command) - measured).tolist(),
+                dt=dt, actual_rate_hz=1 / dt if dt > 0 else None, max_step_deg=0.0,
+                low_level_submitted=controller.effective_command().tolist(),
+                low_level_cmd=np.asarray(status["latest_command_deg"]).tolist()
+                    if status.get("latest_command_deg") is not None else None,
+                low_level_valid=bool(status.get("latest_command_valid", False)))
+            self._enrich_servo_telemetry(telemetry, status, now)
+            self._servo_pub.publish(String(data=json.dumps(telemetry)))
+        except Exception as error:
+            self._block_servo_backend("DIAGNOSTICS_ERROR", error=str(error))
+
+    def _log_servo_direction(self, telemetry):
+        previous = np.asarray(telemetry["previous_q_cmd"])
+        desired_delta = np.asarray(telemetry["target"]) - previous
+        post_contact = np.asarray(telemetry["post_contact_cmd"])
+        post_violation = desired_delta * (post_contact - previous) < -1e-8
+        moved_away = np.asarray(telemetry["distance_after"]) > np.asarray(telemetry["distance_before"]) + 1e-8
+        telemetry["post_contact_direction_violation"] = post_violation.tolist()
+        telemetry["command_moved_away_from_target"] = moved_away.tolist()
+        for index in np.flatnonzero(post_violation | moved_away | np.asarray(telemetry["direction_violation"])):
+            reason = telemetry["command_direction_reason"][index]
+            details = {key: telemetry[key][index] for key in (
+                "target", "previous_q_cmd", "raw_servo_step", "new_q_cmd",
+                "post_compliance_cmd", "post_contact_cmd", "post_guard_cmd", "measured")}
+            details["low_level_cmd"] = (None if telemetry["low_level_cmd"] is None
+                                        else telemetry["low_level_cmd"][index])
+            event = "COMMAND_MOVED_AWAY_FROM_TARGET" if moved_away[index] else "COMMAND_DIRECTION_VIOLATION_BLOCKED"
+            self.get_logger().error(f"{event} joint={JOINT_NAMES[index]} reason={reason} {details}")
+            self._event(event, joint=JOINT_NAMES[index], reason=reason, **details)
+
     def _publish_commanded_state(self, action: dict[str, float]) -> None:
         message = JointState()
         message.header.stamp = self.get_clock().now().to_msg()
@@ -838,7 +1106,10 @@ class Dg5fLeRobotBridge(Node):
         if self._armed:
             reason = disarm_reason(diagnostics)
             if reason != "NONE":
-                self._disarm(reason)
+                if self._control_mode == "servo":
+                    self._block_servo_backend(reason, diagnostics=diagnostics)
+                else:
+                    self._disarm(reason)
 
         self._connected_pub.publish(Bool(data=transport_connected))
         self._armed_pub.publish(Bool(data=self._armed))
@@ -917,7 +1188,12 @@ class Dg5fLeRobotBridge(Node):
 
         snapshot = dict(values)
         snapshot["armed"] = self._armed
-        snapshot["tracking_ok"] = self._tracking_ok
+        snapshot["runtime_state"] = self._runtime_state()
+        snapshot["sdk_block_reason"] = self._sdk_block_reason or "NONE"
+        snapshot.update(self._tracking_diagnostics.snapshot(
+            now=self._now_seconds(), retarget_time=self._last_retarget_time,
+            tracking_ok=self._tracking_ok, tracking_time=self._last_tracking_time,
+            timeout=float(self.get_parameter("tracking_timeout").value)))
         snapshot["disarm_reason"] = self._disarm_reason
         snapshot["recovery_state"] = self._recovery_state
         snapshot["recovery_pending"] = self._recovery_pending
@@ -943,6 +1219,13 @@ class Dg5fLeRobotBridge(Node):
         snapshot["current_guard_total_current_ma"] = self._current_guard_total_current_ma
         snapshot["current_guard_limited_joints"] = self._current_guard_limited_joints
         snapshot.update(self._compliance_diagnostics)
+        measured_for_lead = values.get("measured_pos")
+        physical_for_lead = values.get("latest_command_deg")
+        snapshot["actual_command_lead_deg"] = (
+            np.asarray(physical_for_lead) - np.asarray(measured_for_lead)
+            if (measured_for_lead is not None and physical_for_lead is not None
+                and values.get("latest_command_valid", False))
+            else np.full(20, np.nan))
         snapshot["compliance_age_ms"] = age_ms(self._last_compliance_time, now)
         snapshot["contact_kinematics_error"] = self._contact_kinematics_error
         snapshot["contact_finger_order"] = list(FINGERS)
@@ -973,8 +1256,13 @@ class Dg5fLeRobotBridge(Node):
         ):
             snapshot[name] = self.get_parameter(name).value
         snapshot["backend"] = self._backend_name
+        snapshot["control_mode"] = self._control_mode
+        snapshot["servo_rate_hz"] = self.get_parameter("servo_rate_hz").value
+        snapshot["servo_max_velocity_deg_s"] = self.get_parameter("servo_max_velocity_deg_s").value
         snapshot["control_smoothing"] = self.get_parameter("control_smoothing").value
         snapshot["command_profile"] = "smoothed" if snapshot["control_smoothing"] else "direct_guarded"
+        if self._control_mode == "servo":
+            snapshot["command_profile"] = "servo"
         snapshot["arm_blend_active"] = self._robot.command_shaper.arm_blend_active
         for name in ("max_speed_deg_s", "max_accel_deg_s2", "response_time_s",
                      "filter_tau_s", "target_deadband_deg", "min_send_step_deg",

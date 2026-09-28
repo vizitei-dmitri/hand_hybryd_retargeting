@@ -110,6 +110,8 @@ class NetworkCapture:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--teleop", action="store_true", help="Capture hand inputs, ROS logs and optional Quest logcat")
+    parser.add_argument("--no-adb", action="store_true", help="Skip Quest logcat (e.g. offline tests)")
     parser.add_argument("--ping", action="store_true")
     parser.add_argument("--tcpdump", action="store_true")
     parser.add_argument("--interface", default="enp49s0")
@@ -118,9 +120,11 @@ def main():
     project = Path(__file__).resolve().parents[1]
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_{os.getpid()}"
     directory = project / "debug_runs" / stamp
-    flags = [flag for flag, enabled in (("--ping", args.ping), ("--tcpdump", args.tcpdump)) if enabled]
+    flags = [flag for flag, enabled in (("--ping", args.ping), ("--tcpdump", args.tcpdump), ("--teleop", args.teleop)) if enabled]
     stop_path = f"/workspace/debug_runs/{stamp}/.stop_recording"
-    command = ["docker", "compose", "-f", str(project / "compose.yaml"), "exec", "-T",
+    ros_domain = (["-e", f"ROS_DOMAIN_ID={os.environ['ROS_DOMAIN_ID']}"]
+                  if "ROS_DOMAIN_ID" in os.environ else [])
+    command = ["docker", "compose", "-f", str(project / "compose.yaml"), "exec", "-T", *ros_domain,
                "lerobot_hand", "bash", "-lc",
                'source /opt/ros/humble/setup.bash; source /workspace/install/setup.bash; exec python3 -m lerobot_robot_dg5f.debug_recorder "$@"',
                "recorder", "--run-stamp", stamp, "--external-network", "--defer-archive",
@@ -141,6 +145,16 @@ def main():
                 raise RuntimeError("ROS recorder did not initialize")
             time.sleep(0.1)
         network = NetworkCapture(directory, args.interface, args.hand_ip, args.ping, args.tcpdump)
+        if args.teleop:
+            if args.no_adb:
+                network.status["adb_error"] = "explicitly disabled (--no-adb)"
+            else:
+                adb_command = ["adb"]
+                if os.environ.get("ANDROID_SERIAL"):
+                    adb_command += ["-s", os.environ["ANDROID_SERIAL"]]
+                network.start_process("adb", [*adb_command, "logcat", "-v", "epoch", "-T", "1",
+                    "Unity:V", "AndroidRuntime:E", "OVRPlugin:V", "OpenXR:V", "VrApi:V", "*:S"],
+                    "quest_logcat.log")
         print(f"Host network capture: {directory}\nPress Ctrl+C to finalize one archive.", flush=True)
         while not interrupted and process.poll() is None:
             network.sample()

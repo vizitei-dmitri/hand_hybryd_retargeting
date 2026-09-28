@@ -113,7 +113,7 @@ class PerFingerObjectContact:
         events.append(dict(event=event, finger=name, state=state, reason=reason))
 
     def update(self, *, desired_deg, effective_deg, measured_deg, current_ma,
-               slope_ma_s, soft_target_deg, now):
+               slope_ma_s, soft_target_deg, now, apply_resume_ramp=True):
         config = self.config
         desired, effective, measured = map(np.asarray, (desired_deg, effective_deg, measured_deg))
         current, slope = np.asarray(current_ma), np.asarray(slope_ma_s)
@@ -171,9 +171,16 @@ class PerFingerObjectContact:
             "finger_progress_ratio", "post_contact_gain", "contact_preload_deg")}
         anchors = {f"contact_anchor_{key}": np.full(20, np.nan)
                    for key in ("measured", "effective", "desired")}
+        resume_offset = np.zeros(20)
+        resume_limited = np.zeros(20, dtype=bool)
+        contact_evidence = np.zeros(20, dtype=bool)
 
         for number, (name, joints) in enumerate(self.chains.items()):
             finger = self.fingers[name]
+            if not apply_resume_ramp and finger.state == "FREE":
+                # Servo already ramps from persistent q_cmd. A second 15 deg/s
+                # ramp/offset would keep a released finger slow while FREE.
+                finger.resume_offset = None
             joint_current = current[joints]
             peak_current = float(np.max(joint_current))
             opening_now = intent_motion[joints] < -config.intent_deadband_deg
@@ -203,6 +210,7 @@ class PerFingerObjectContact:
                                    & (slope[joints] >= config.fast_slope_ma_s))
             fast = bool(np.any(fast_load_evidence | fast_slope_evidence))
             physical_evidence = evidence | fast_load_evidence | fast_slope_evidence
+            contact_evidence[joints] = physical_evidence
             reason = "HIGH_LOAD_LOW_PROGRESS" if np.any(fast_load_evidence) else (
                 "RISING_CURRENT_LOW_PROGRESS" if fast else "LOW_PROGRESS")
 
@@ -282,9 +290,10 @@ class PerFingerObjectContact:
                             and now - finger.quiet_since >= config.release_hold_s)
                 if opened or unloaded:
                     self._transition(finger, name, "FREE", "OPERATOR_OPENING" if opened else "LOAD_RELEASED", events)
-                    # Keep this tick's bounded reference; remove its offset slowly
-                    # on subsequent FREE ticks instead of jumping to human desired.
-                    finger.resume_offset = np.maximum(desired[joints] - target[joints], 0)
+                    # Keep this tick's bounded reference. Legacy removes the
+                    # offset slowly; servo already limits subsequent live steps.
+                    finger.resume_offset = (np.maximum(desired[joints] - target[joints], 0)
+                                            if apply_resume_ramp else None)
                     finger.released_at = now
                     finger.pending_since = finger.quiet_since = None
                     finger.last_evidence_time = None
@@ -296,6 +305,7 @@ class PerFingerObjectContact:
                 target[joints] = np.minimum(target[joints], desired[joints] - finger.resume_offset)
                 target[joints] = np.minimum(target[joints], effective[joints] + config.resume_rate_deg_s * dt)
                 limited[joints] = True
+                resume_limited[joints] = True
                 if np.max(finger.resume_offset) <= 1e-6 and np.all(desired[joints] <= target[joints] + 1e-6):
                     finger.resume_offset = None
 
@@ -312,12 +322,22 @@ class PerFingerObjectContact:
             diag["finger_progress_ratio"].append(float(np.min(ratios[joints][loaded])) if ready else math.nan)
             diag["post_contact_gain"].append(gain)
             diag["contact_preload_deg"].append(float(preload) if finger.state == "CONTACT_HOLD" else 0.0)
+            if finger.resume_offset is not None:
+                resume_offset[joints] = finger.resume_offset
             for key in ("measured", "effective", "desired"):
                 value = getattr(finger, key)
                 if value is not None:
                     anchors[f"contact_anchor_{key}"][joints] = value
 
         diag.update(anchors)
+        diag["object_contact_resume_offset_deg"] = resume_offset
+        diag["object_contact_resume_limited"] = resume_limited
+        diag["object_contact_resume_ramp_enabled"] = bool(apply_resume_ramp)
+        diag["object_contact_window_ready"] = bool(ready)
+        diag["joint_requested_motion_deg"] = requested.copy()
+        diag["joint_measured_motion_deg"] = motion[2].copy()
+        diag["joint_progress_ratio"] = ratios.copy()
+        diag["joint_object_contact_evidence"] = contact_evidence
         diag["object_contact_limited_joints"] = [JOINT_NAMES[j] for j in np.flatnonzero(limited)]
         for event in events:
             number = list(self.chains).index(event["finger"])

@@ -17,13 +17,17 @@ import numpy as np
 import rclpy
 import yaml
 from diagnostic_msgs.msg import DiagnosticArray
+from geometry_msgs.msg import PoseArray
+from vr_haptic_msgs.msg import ManoLandmarks
+from rcl_interfaces.msg import Log
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32MultiArray, String
 from trajectory_msgs.msg import JointTrajectory
 
 from .constants import JOINT_NAMES, TESOLLO_TEMPERATURE_LIMIT_C
-from .debug_recording import DebugRunWriter, NETWORK_FIELDS, CONTACT_ARRAY_FIELDS
+from .debug_recording import DebugRunWriter, NETWORK_FIELDS, CONTACT_ARRAY_FIELDS, OBJECT_CONTACT_FINGER_FIELDS
 from .current_guard import ComplianceConfig
 from .object_contact import ObjectContactConfig
 
@@ -39,6 +43,10 @@ TOPICS = {
     "diagnostics": "/dg5f/lerobot/diagnostics",
     "marker": "/dg5f/debug_marker",
     "events": "/dg5f/lerobot/events",
+    "servo": "/dg5f/lerobot/servo_state",
+    "quest_hand": "/quest/hand_pose",
+    "landmarks": "/hands/right/landmarks",
+    "rosout": "/rosout",
 }
 
 
@@ -64,6 +72,7 @@ def collect_manifest(args: argparse.Namespace) -> dict[str, object]:
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         parameters = config["dg5f_lerobot_bridge"]["ros__parameters"]
         wanted = (
+            "control_mode", "servo_rate_hz", "servo_max_velocity_deg_s",
             "control_smoothing",
             "max_speed_deg_s",
             "max_accel_deg_s2",
@@ -95,6 +104,7 @@ def collect_manifest(args: argparse.Namespace) -> dict[str, object]:
         "temperature_limit_c": TESOLLO_TEMPERATURE_LIMIT_C,
         "configuration": configuration,
         "ros_topics": dict(TOPICS),
+        "teleop_capture_requested": bool(getattr(args, "teleop", False)),
         "tcpdump_requested": bool(args.tcpdump),
         "ping_requested": bool(args.ping),
     }
@@ -176,6 +186,7 @@ def _parse_diagnostics(message: DiagnosticArray) -> dict[str, object]:
                 "raw_current",
                 "joint_current_scale", "joint_current_slope_ma_s", "joint_slope_scale",
                 "joint_contact_scale", "joint_tracking_scale", "joint_lead_budget_deg",
+                "actual_command_lead_deg",
             } or item.key in CONTACT_ARRAY_FIELDS:
                 try:
                     array = [float(value) for value in item.value.split(",")]
@@ -184,6 +195,15 @@ def _parse_diagnostics(message: DiagnosticArray) -> dict[str, object]:
                 expected = len(CONTACT_ARRAY_FIELDS.get(item.key, JOINT_NAMES))
                 if len(array) == expected:
                     decoded[item.key] = array
+            elif item.key in OBJECT_CONTACT_FINGER_FIELDS:
+                values = [_parse_scalar(value) for value in item.value.split(",")]
+                if len(values) == 5:
+                    decoded[item.key] = values
+            elif item.key.startswith("contact_anchor_"):
+                try:
+                    decoded[item.key] = [float(value) for value in item.value.split(",")]
+                except ValueError:
+                    pass
             elif item.key in {"limited_fingers", "contact_limited_pairs"}:
                 decoded[item.key] = [value for value in item.value.split(",") if value]
             else:
@@ -312,10 +332,43 @@ class Dg5fDebugRecorder(Node):
         )
         self.create_subscription(String, TOPICS["marker"], self._on_marker, 10)
         self.create_subscription(String, TOPICS["events"], self._on_event, 100)
+        self.create_subscription(String, TOPICS["servo"], self._on_servo, 100)
+        if args.teleop:
+            self.writer.enable_teleop_recording()
+            passive_qos = QoSProfile(depth=100, reliability=QoSReliabilityPolicy.BEST_EFFORT)
+            self.create_subscription(ManoLandmarks, TOPICS["quest_hand"],
+                lambda msg: self._on_teleop_input("quest_hand", msg), passive_qos)
+            self.create_subscription(PoseArray, TOPICS["landmarks"],
+                lambda msg: self._on_teleop_input("landmarks", msg), passive_qos)
+            self.create_subscription(Log, TOPICS["rosout"], self._on_rosout, passive_qos)
         self.create_timer(1.0 / self._rate, self._sample)
+
+    def _on_teleop_input(self, name, message):
+        points = message.landmarks if name == "quest_hand" else [pose.position for pose in message.poses]
+        self.writer.record_input(name, dict(
+            source_stamp_sec=message.header.stamp.sec,
+            source_stamp_nanosec=message.header.stamp.nanosec,
+            frame_id=message.header.frame_id,
+            points=[[point.x, point.y, point.z] for point in points]))
+
+    def _on_rosout(self, message):
+        if not message.name.startswith(("unity_", "dg5f_", "ros_tcp_endpoint")):
+            return
+        self.writer.record_input("rosout", dict(
+            source_stamp_sec=message.stamp.sec, source_stamp_nanosec=message.stamp.nanosec,
+            name=message.name, level=message.level, message=message.msg,
+            file=message.file, function=message.function, line=message.line))
 
     def _set_bool(self, key: str, message: Bool) -> None:
         self._state[key] = bool(message.data)
+
+    def _on_servo(self, message):
+        try:
+            tick = json.loads(message.data)
+            if isinstance(tick, dict):
+                self.writer.record_servo_tick(tick)
+        except (ValueError, TypeError):
+            return
 
     def _on_target(self, message: JointTrajectory) -> None:
         if not message.points:
@@ -356,6 +409,7 @@ class Dg5fDebugRecorder(Node):
             if key in self._diagnostics:
                 self.writer.manifest.setdefault("runtime_configuration", {})[key] = self._diagnostics[key]
         for key in (
+            "control_mode", "servo_rate_hz", "servo_max_velocity_deg_s",
             "control_smoothing", "command_profile", "max_speed_deg_s",
             "max_accel_deg_s2", "response_time_s", "filter_tau_s",
             "target_deadband_deg", "min_send_step_deg", "max_direct_step_deg",
@@ -396,6 +450,9 @@ class Dg5fDebugRecorder(Node):
         if event.get("event") in {"ARM_REQUESTED", "ARMED", "DISARMED", "RECOVERY_STARTED", "RECOVERY_SUCCEEDED", "RECOVERY_FAILED",
                                  "COMPLIANCE_ACTIVE", "COMPLIANCE_RELEASED", "CURRENT_GUARD_TRIP", "STALL_GUARD_TRIP",
                                  "OBJECT_CONTACT_PENDING", "OBJECT_CONTACT_LATCHED", "OBJECT_CONTACT_RELEASED",
+                                 "TRACKING_LOST", "TRACKING_RECOVERED", "CURRENT_LOAD_THRESHOLD", "SDK_ERROR",
+                                 "CONTACT_PENDING", "CONTACT_LATCHED", "CONTACT_RELEASED",
+                                 "COMMAND_MOVED_AWAY_FROM_TARGET", "COMMAND_DIRECTION_VIOLATION_BLOCKED",
                                  "CURRENT_GUARD_ACTIVE", "CURRENT_GUARD_RELEASED"}:
             name = event.pop("event")
             source_time = event.get("source_monotonic_s")
@@ -451,6 +508,7 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
     parser.add_argument("--hand-ip", default="169.254.186.72")
     parser.add_argument("--hand-port", type=int, default=502)
     parser.add_argument("--backend", default="tesollo")
+    parser.add_argument("--teleop", action="store_true", help="Record raw Quest/landmarks and ROS logs")
     parser.add_argument("--ping", action="store_true")
     parser.add_argument("--tcpdump", action="store_true")
     parser.add_argument("--run-stamp")

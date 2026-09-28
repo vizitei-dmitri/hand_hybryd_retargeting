@@ -9,6 +9,7 @@ from lerobot.robots import Robot
 
 from .backends import MockDg5fBackend, TesolloDg5fBackend
 from .command_shaper import PositionCommandShaper
+from .servo_controller import ServoController
 from .config_dg5f import Dg5fConfig
 from .constants import (
     JOINT_NAMES,
@@ -75,22 +76,31 @@ class Dg5f(Robot):
         shaper_kwargs = {}
         if clock is not None:
             shaper_kwargs["clock"] = clock
-        self.command_shaper = PositionCommandShaper(
-            LOWER_LIMITS_DEG,
-            UPPER_LIMITS_DEG,
-            disabled_positions_deg=disabled_by_index,
-            smoothing=config.control_smoothing,
-            max_speed_deg_s=config.max_speed_deg_s,
-            max_accel_deg_s2=config.max_accel_deg_s2,
-            response_time_s=config.response_time_s,
-            filter_tau_s=config.filter_tau_s,
-            target_deadband_deg=config.target_deadband_deg,
-            min_send_step_deg=config.min_send_step_deg,
-            max_direct_step_deg=config.max_direct_step_deg,
-            startup_blend_s=config.startup_blend_s,
-            max_dt_s=config.max_dt_s,
-            **shaper_kwargs,
-        )
+        if config.control_mode == "servo":
+            self.command_shaper = ServoController(
+                LOWER_LIMITS_DEG, UPPER_LIMITS_DEG,
+                disabled_positions_deg=disabled_by_index,
+                rate_hz=config.servo_rate_hz,
+                max_velocity_deg_s=config.servo_max_velocity_deg_s,
+                **shaper_kwargs,
+            )
+        else:
+            self.command_shaper = PositionCommandShaper(
+                LOWER_LIMITS_DEG,
+                UPPER_LIMITS_DEG,
+                disabled_positions_deg=disabled_by_index,
+                smoothing=config.control_smoothing,
+                max_speed_deg_s=config.max_speed_deg_s,
+                max_accel_deg_s2=config.max_accel_deg_s2,
+                response_time_s=config.response_time_s,
+                filter_tau_s=config.filter_tau_s,
+                target_deadband_deg=config.target_deadband_deg,
+                min_send_step_deg=config.min_send_step_deg,
+                max_direct_step_deg=config.max_direct_step_deg,
+                startup_blend_s=config.startup_blend_s,
+                max_dt_s=config.max_dt_s,
+                **shaper_kwargs,
+            )
         self._telemetry["pos"] = initial
 
     @cached_property
@@ -290,6 +300,32 @@ class Dg5f(Robot):
             f"{joint}.pos": float(effective[index])
             for index, joint in enumerate(JOINT_NAMES)
         }
+
+    def servo_tick(self, target_deg, *, guard, now=None):
+        """Submit a full pose through the bridge's existing safety guard.
+
+        Called only by its independent timer, never by a retargeting callback.
+        Rejected submissions do not advance q_cmd. The bridge's servo guard
+        supplies a persistent trajectory and a separate physical lead envelope.
+        """
+        if self.config.control_mode != "servo":
+            raise RuntimeError("servo_tick requires control_mode=servo")
+        if not self.is_connected:
+            raise RuntimeError("DG5F is not connected")
+        controller = self.command_shaper
+        proposed = controller.propose(target_deg, now)
+        guarded = guard(proposed)
+        if guarded is None:
+            return None
+        from .servo_controller import GuardedServoCommand
+        envelope = guarded if isinstance(guarded, GuardedServoCommand) else None
+        command = controller.constrain_guarded_output(
+            guarded.trajectory_deg if envelope is not None else guarded)
+        output = controller.physical_output(command, envelope)
+        self.backend.send_positions(output)
+        controller.accept_output(command, physical_deg=output)
+        return {f"{joint}.pos": float(command[index])
+                for index, joint in enumerate(JOINT_NAMES)}
 
     def hold_position(self) -> None:
         """Cancel motion and stop low-level keepalive without a new setpoint."""

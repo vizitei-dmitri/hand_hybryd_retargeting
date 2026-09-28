@@ -215,6 +215,7 @@ class AdaptiveCurrentGuard:
         pair_distances_m: np.ndarray | None = None,
         pair_gradients_m_deg: np.ndarray | None = None,
         contact_stamp_s: float | None = None,
+        operator_target_deg: np.ndarray | None = None,
     ) -> CurrentGuardDecision:
         currents = np.asarray(current_ma, dtype=np.float64)
         measured = np.asarray(measured_deg, dtype=np.float64)
@@ -232,6 +233,11 @@ class AdaptiveCurrentGuard:
             np.isfinite(desired)
         ):
             raise ValueError("current guard poses must be finite")
+        # Servo proposals are small motor steps, not operator hand intent.
+        # Keep legacy semantics when no separate operator target is supplied.
+        operator = None if operator_target_deg is None else np.asarray(operator_target_deg, dtype=np.float64)
+        if operator is not None and (operator.shape != effective.shape or not np.all(np.isfinite(operator))):
+            raise ValueError("operator target must contain finite joint positions")
         if not math.isfinite(now):
             raise ValueError("current guard timestamp must be finite")
 
@@ -269,7 +275,10 @@ class AdaptiveCurrentGuard:
         self._global_scale = self._release_smoothed_scale(
             self._global_scale, raw_global_scale, dt
         )
-        combined_scale = np.minimum(self._joint_scale, self._global_scale)
+        # In servo, total-load thresholds are diagnostic; one loaded joint
+        # must not freeze all the otherwise unloaded joints.
+        combined_scale = (self._joint_scale.copy() if operator is not None else
+                          np.minimum(self._joint_scale, self._global_scale))
 
         # Decide whether the requested target would increase the position error
         # that the actuator is already fighting. Relief motion is never slowed.
@@ -284,6 +293,8 @@ class AdaptiveCurrentGuard:
         enabled = config is not None and config.enabled
         contact_valid = False
         contact_pair_weights = np.zeros(len(PAIRS))
+        pair_load_risk = np.zeros(len(PAIRS))
+        pair_scale = np.ones(len(PAIRS))
         contact_scale = np.ones(self.joint_count)
         joint_slope_scale = np.ones(self.joint_count)
         global_slope_scale = 1.0
@@ -291,6 +302,9 @@ class AdaptiveCurrentGuard:
         contact_closing = np.zeros(self.joint_count, dtype=bool)
         load_evidence = np.zeros(self.joint_count)
         lead_budget = np.full(self.joint_count, np.inf)
+        raw_adaptive = np.ones(self.joint_count)
+        lead_step_scale = np.ones(self.joint_count)
+        lead_limited = np.zeros(self.joint_count, dtype=bool)
 
         if enabled:
             joint_slope_risk = 1 - _linear_scale(slope, config.joint_slope_soft_ma_s, config.joint_slope_hard_ma_s)
@@ -347,6 +361,7 @@ class AdaptiveCurrentGuard:
                     weight = contact_pair_weights[pair]
                     risk = float(np.max(pair_load[involved]))
                     scale = (1 - config.contact_preemptive_reduction * weight) * (1 - weight * risk)
+                    pair_load_risk[pair], pair_scale[pair] = risk, scale
                     if np.any(affected) and scale < 0.999999:
                         contact_limited_pairs.append(PAIR_NAMES[pair])
                         contact_scale[affected] = np.minimum(contact_scale[affected], scale)
@@ -356,7 +371,7 @@ class AdaptiveCurrentGuard:
                 self._last_contact_stamp = self._last_distances = None
                 self._distance_rates.fill(0)
             raw_adaptive = np.minimum.reduce([
-                joint_slope_scale, np.full(self.joint_count, global_slope_scale), contact_scale,
+                joint_slope_scale, np.full(self.joint_count, 1.0 if operator is not None else global_slope_scale), contact_scale,
             ])
             # Smooth only contact + dI/dt. Keep current protection out of this
             # state so its immediate attack and existing release stay separate.
@@ -377,17 +392,24 @@ class AdaptiveCurrentGuard:
                 # Cap further error accumulation; never command a retreat toward
                 # feedback. If already over budget, simply don't advance further.
                 loaded = limited & (load_evidence > 0.01) & (delta * current_error >= 0)
+                before_lead = allowed_step.copy()
                 allowed_step[loaded] = np.minimum(allowed_step[loaded],
                     np.maximum(0, lead_budget[loaded] - np.abs(current_error[loaded])))
+                lead_limited = allowed_step < before_lead - 1e-8
+                np.divide(allowed_step, before_lead, out=lead_step_scale, where=before_lead > 1e-8)
             target[limited] = effective[limited] + np.clip(
                 delta[limited], -allowed_step[limited], allowed_step[limited]
             )
 
+        post_compliance = target.copy()
+        compliance_limited = limited.copy()
         object_decision = None
         if self._object_contact is not None:
             object_decision = self._object_contact.update(
-                desired_deg=desired, effective_deg=effective, measured_deg=measured,
+                desired_deg=desired if operator is None else operator,
+                effective_deg=effective, measured_deg=measured,
                 current_ma=current_abs, slope_ma_s=slope, soft_target_deg=target, now=float(now),
+                apply_resume_ramp=operator is None,
             )
             target = object_decision.target_deg
             limited |= object_decision.limited_mask
@@ -397,18 +419,56 @@ class AdaptiveCurrentGuard:
             relief[object_mask] = ((target[object_mask] - effective[object_mask])
                                    * current_error[object_mask] < -1e-6)
 
+        post_contact = target.copy()
+
         # At a hard threshold, stop adding load rather than generating an
         # automatic retreat. Freezing at the last effective setpoint is less
         # aggressive and avoids the guard itself commanding a sudden motion.
         # If the operator is already asking to reduce the position error, that
         # relief command remains allowed through.
-        hard_loaded = (current_abs >= self.hard_ma) | (
-            (total_current >= self.total_hard_ma) & (np.abs(current_error) > 1e-3)
-        )
+        hard_loaded = current_abs >= self.hard_ma
+        if operator is None:
+            hard_loaded |= ((total_current >= self.total_hard_ma)
+                            & (np.abs(current_error) > 1e-3))
         hard_freeze = hard_loaded & ~relief
         if np.any(hard_freeze):
             target[hard_freeze] = effective[hard_freeze]
             limited |= hard_freeze
+
+        direction_reasons = ["CURRENT_HARD_FREEZE" if frozen else "NONE" for frozen in hard_freeze]
+        if operator is not None:
+            # A FREE contact resume offset must never turn convergence into a
+            # retreat. Clamp to the interval from accepted command to real intent.
+            # This also prevents stale opening anchors from overshooting intent.
+            candidate = target.copy()
+            target = np.clip(target, np.minimum(effective, operator), np.maximum(effective, operator))
+            for index in np.flatnonzero(np.abs(candidate - target) > 1e-8):
+                direction_reasons[index] = "BLOCKED_CONTACT_OFFSET_REVERSAL"
+            if object_decision is not None:
+                contact_diag = object_decision.diagnostics
+                for finger_index, joints in enumerate(self._object_contact.chains.values()):
+                    if contact_diag["object_contact_state"][finger_index] != "CONTACT_HOLD":
+                        continue
+                    preload = contact_diag["contact_preload_deg"][finger_index]
+                    anchor = contact_diag["contact_anchor_measured"][joints]
+                    # Explicit yield is bounded by BOTH measured pose and the
+                    # fixed contact anchor: following a drifting motor cannot
+                    # ratchet the retreat all the way to a joint limit.
+                    floor = np.minimum(effective[joints], np.maximum.reduce([
+                        measured[joints] + preload, anchor + preload,
+                        effective[joints] - self._object_contact.config.yield_rate_deg_s * min(dt, 0.05),
+                    ]))
+                    yield_mask = ((operator[joints] >= effective[joints])
+                                  & (candidate[joints] < effective[joints] - 1e-8)
+                                  & (floor < effective[joints] - 1e-8)
+                                  & ~hard_freeze[joints])
+                    for local in np.flatnonzero(yield_mask):
+                        index = joints[local]
+                        target[index] = max(candidate[index], floor[local])
+                        direction_reasons[index] = "CONTACT_PRELOAD_YIELD"
+            # A reversal that was blocked to HOLD is no longer relief. Do not
+            # accidentally exempt its stationary loaded motor from stall safety.
+            relief &= np.abs(target - effective) > 1e-8
 
         over_trip = bool(
             max_current >= self.trip_ma or total_current >= self.total_trip_ma
@@ -442,6 +502,40 @@ class AdaptiveCurrentGuard:
         adaptive_tracking_scale[nonzero_delta] = np.minimum(adaptive_tracking_scale[nonzero_delta],
             np.abs(target[nonzero_delta] - effective[nonzero_delta]) /
             np.minimum(np.abs(delta[nonzero_delta]), self.nominal_step_deg))
+
+        # Expose the existing stages; these gains are observations, not new
+        # limiters. Progress/error are contact evidence, not independent scales.
+        def stage_gain(output, reference):
+            return np.divide(output - effective, reference - effective,
+                             out=np.ones(self.joint_count), where=np.abs(reference - effective) > 1e-8)
+
+        limiting_reasons = []
+        for joint in range(self.joint_count):
+            reasons = []
+            if compliance_limited[joint]:
+                if self._joint_scale[joint] < 0.999999:
+                    reasons.append("JOINT_CURRENT")
+                if operator is None and self._global_scale < 0.999999:
+                    reasons.append("GLOBAL_CURRENT")
+                if joint_slope_scale[joint] < 0.999999:
+                    reasons.append("JOINT_CURRENT_SLOPE")
+                if operator is None and global_slope_scale < 0.999999:
+                    reasons.append("GLOBAL_CURRENT_SLOPE")
+                if contact_scale[joint] < 0.999999:
+                    reasons.append("PAIR_CONTACT")
+                if enabled and self._adaptive_scale[joint] < raw_adaptive[joint] - 1e-8:
+                    reasons.append("ADAPTIVE_RELEASE")
+                if lead_limited[joint]:
+                    reasons.append("LEAD_BUDGET")
+            if object_decision is not None and object_decision.limited_mask[joint]:
+                reasons.append("OBJECT_CONTACT_RESUME" if
+                               object_decision.diagnostics["object_contact_resume_limited"][joint]
+                               else "OBJECT_CONTACT_HOLD")
+            if hard_freeze[joint]:
+                reasons.append("CURRENT_HARD_FREEZE")
+            if direction_reasons[joint] not in ("NONE", "CURRENT_HARD_FREEZE"):
+                reasons.append(direction_reasons[joint])
+            limiting_reasons.append("|".join(reasons) or "NONE")
         diagnostics = {
             "compliance_enabled": enabled, "compliance_active": bool(enabled and np.any(limited)),
             "contact_signal_valid": bool(contact_valid),
@@ -449,6 +543,23 @@ class AdaptiveCurrentGuard:
             "global_slope_scale": float(global_slope_scale),
             "total_current_ma": total_current, "total_current_slope_ma_s": total_slope,
             "joint_current_scale": self._joint_scale.copy(),
+            "joint_raw_current_scale": raw_joint_scale.copy(),
+            "raw_global_current_scale": raw_global_scale,
+            "joint_raw_adaptive_scale": raw_adaptive.copy(),
+            "joint_adaptive_scale": self._adaptive_scale.copy(),
+            "joint_combined_scale": combined_scale.copy(),
+            "joint_command_error_deg": current_error.copy(),
+            "joint_requested_step_deg": delta.copy(),
+            "joint_load_evidence": load_evidence.copy(),
+            "joint_relief": relief.copy(),
+            "joint_worsening": worsening.copy(),
+            "joint_lead_limited": lead_limited,
+            "joint_lead_step_scale": lead_step_scale,
+            "joint_compliance_gain": stage_gain(post_compliance, desired),
+            "joint_object_contact_gain": stage_gain(post_contact, post_compliance),
+            "joint_guard_gain": stage_gain(target, desired),
+            "joint_hard_freeze": hard_freeze.copy(),
+            "joint_limiting_reason": limiting_reasons,
             "joint_current_slope_ma_s": slope, "joint_slope_scale": joint_slope_scale,
             "joint_contact_scale": contact_scale,
             "joint_tracking_scale": adaptive_tracking_scale,
@@ -457,12 +568,26 @@ class AdaptiveCurrentGuard:
             "pair_distances_m": np.asarray(pair_distances_m).copy() if contact_valid else np.full(len(PAIRS), np.nan),
             "pair_distance_rates_m_s": self._distance_rates.copy(),
             "pair_contact_weights": contact_pair_weights,
+            "pair_load_risk": pair_load_risk,
+            "pair_tracking_scale": pair_scale,
             "contact_limited_pairs": contact_limited_pairs,
             "limited_fingers": [name for finger, name in enumerate(FINGERS)
                                 if np.any(limited[finger * 4:finger * 4 + 4])],
             "stall_duration_s": float(np.max(stall_duration)),
         }
 
+        if operator is not None:
+            diagnostics.update(
+                post_compliance_cmd=post_compliance,
+                post_contact_cmd=post_contact,
+                post_guard_cmd=target.copy(),
+                command_direction_reason=direction_reasons,
+                # Apply this SAME budget to the final physical setpoint, after
+                # contact, hard freeze and trajectory step limiting. The old
+                # allowed_step above only prevented NEW gap accumulation.
+                physical_lower_deg=measured - lead_budget,
+                physical_upper_deg=measured + lead_budget,
+            )
         if object_decision is not None:
             diagnostics.update(object_decision.diagnostics)
 

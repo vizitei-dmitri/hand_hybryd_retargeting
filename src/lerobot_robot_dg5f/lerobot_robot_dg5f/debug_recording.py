@@ -37,6 +37,7 @@ ARRAY_FIELDS = (
     "joint_contact_scale",
     "joint_tracking_scale",
     "joint_lead_budget_deg",
+    "actual_command_lead_deg",
     "contact_anchor_measured",
     "contact_anchor_effective",
     "contact_anchor_desired",
@@ -104,6 +105,13 @@ STATUS_FIELDS = (
     "contact_kinematics_error",
     "last_command_age_ms",
     "last_tracking_age_ms",
+    "last_quest_age_ms", "last_landmarks_age_ms", "last_retarget_age_ms",
+    "last_quest_received_monotonic_s", "last_landmarks_received_monotonic_s",
+    "last_successful_retarget_monotonic_s",
+    "landmarks_stamp_age_ms", "quest_header_stamp_s", "landmarks_header_stamp_s",
+    "quest_message_count", "landmarks_message_count",
+    "tracking_loss_reason", "tracking_loss_detail", "unity_connection_status",
+    "runtime_state", "sdk_block_reason",
     "last_telemetry_age_ms",
     "last_sdk_packet_age_ms",
     "last_communication_callback_age_ms",
@@ -186,6 +194,7 @@ class DebugRunWriter:
         self.run_dir = run_dir
         self.archive_path = root / f"dg5f_debug_{run_dir.name}.tar.gz"
         self._finalized = False
+        self._input_files = {}
 
         payload = dict(manifest)
         payload.setdefault(
@@ -222,6 +231,7 @@ class DebugRunWriter:
         self._timeline_file = (run_dir / "timeline.csv").open(
             "w", newline="", encoding="utf-8"
         )
+        self._servo_file = (run_dir / "servo_ticks.jsonl").open("w", encoding="utf-8")
         self._events_file = (run_dir / "events.jsonl").open(
             "w", encoding="utf-8"
         )
@@ -279,6 +289,26 @@ class DebugRunWriter:
             "temperature": (math.nan, ""),
             "tracking_error": (math.nan, ""),
         }
+
+    def enable_teleop_recording(self):
+        self.manifest["teleop_capture"] = dict(format="jsonl", counts={})
+        for name in ("quest_hand", "landmarks", "rosout"):
+            self._input_files[name] = (self.run_dir / f"{name}.jsonl").open("w", encoding="utf-8")
+            self.manifest["teleop_capture"]["counts"][name] = 0
+
+    def record_input(self, name, payload):
+        record = dict(payload, receipt_monotonic_s=self._clock(),
+                      receipt_wall_time_unix_s=self._wall_time(), recorder_elapsed_s=self.elapsed())
+        stream = self._input_files[name]
+        stream.write(json.dumps(json_safe(record), allow_nan=False) + "\n")
+        stream.flush()
+        self.manifest["teleop_capture"]["counts"][name] += 1
+
+    def record_servo_tick(self, tick):
+        """Preserve every received control tick, independent of 30 Hz timeline."""
+        payload = dict(tick, recorder_elapsed_s=self.elapsed())
+        self._servo_file.write(json.dumps(json_safe(payload), allow_nan=False) + "\n")
+        self._servo_file.flush()
 
     def elapsed(self) -> float:
         return max(0.0, self._clock() - self._start_monotonic)
@@ -495,6 +525,9 @@ class DebugRunWriter:
         self._timeline_file.flush()
         self._events_file.flush()
         self._network_file.flush()
+        for stream in self._input_files.values():
+            stream.close()
+        self._servo_file.close()
         self._timeline_file.close()
         self._events_file.close()
         self._network_file.close()
@@ -509,6 +542,9 @@ class DebugRunWriter:
             f"compliance_released_events: {self.event_counts.get('COMPLIANCE_RELEASED', 0)}",
             f"current_guard_trip_events: {self.event_counts.get('CURRENT_GUARD_TRIP', 0)}",
             f"stall_guard_trip_events: {self.event_counts.get('STALL_GUARD_TRIP', 0)}",
+            f"current_load_threshold_events: {self.event_counts.get('CURRENT_LOAD_THRESHOLD', 0)}",
+            f"sdk_error_events: {self.event_counts.get('SDK_ERROR', 0)}",
+            f"tracking_recovered_events: {self.event_counts.get('TRACKING_RECOVERED', 0)}",
             f"arm_count: {self.event_counts.get('ARMED', 0)}",
             f"tracking_lost_count: {self.event_counts.get('TRACKING_LOST', 0)}",
             f"disarm_count_by_reason: {json.dumps(self.reason_counts.get('DISARMED', {}))}",

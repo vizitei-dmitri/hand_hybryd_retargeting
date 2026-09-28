@@ -10,13 +10,13 @@ from lerobot_robot_dg5f.debug_recording import DebugRunWriter
 from lerobot_robot_dg5f.object_contact import ObjectContactConfig
 
 
-def guard(with_object=True):
+def guard(with_object=True, **object_parameters):
     return AdaptiveCurrentGuard(
         20, soft_ma=350, hard_ma=650, trip_ma=850,
         total_soft_ma=600, total_hard_ma=850, total_trip_ma=1050,
         trip_hold_s=0.04, release_tau_s=0.20, nominal_step_deg=4,
         compliance=ComplianceConfig(),
-        object_contact=ObjectContactConfig() if with_object else None,
+        object_contact=ObjectContactConfig(**object_parameters) if with_object else None,
     )
 
 
@@ -53,7 +53,9 @@ def send(shaper, result, now):
 
 
 def settle(current=200, joint=6, error=9):
-    controller, data = guard(), poses(joint, current, error)
+    # Preserve the original preload/gain regression's 200 mA calibration.
+    # Temporal detector tests use the current physical bridge profile instead.
+    controller, data = guard(current_ma=200.0), poses(joint, current, error)
     # Replay an already blocked setpoint. At 533 mA the existing guard also
     # freezes a further close request, while leaving the logged 9-degree error.
     data["desired_deg"][joint] = data["effective_deg"][joint] + (2 if current > 350 else 0)

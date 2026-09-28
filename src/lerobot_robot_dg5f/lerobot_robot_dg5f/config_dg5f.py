@@ -17,6 +17,9 @@ class Dg5fConfig(RobotConfig):
     port: int = 502
     slave_id: int = 1
     backend: str = "mock"
+    control_mode: str = "legacy"
+    servo_rate_hz: float = 60.0
+    servo_max_velocity_deg_s: float = 120.0
     control_smoothing: bool = True
     max_speed_deg_s: float = 30.0
     max_accel_deg_s2: float = 60.0
@@ -37,6 +40,8 @@ class Dg5fConfig(RobotConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.control_mode not in {"legacy", "servo"}:
+            raise ValueError("control_mode must be legacy or servo")
         if self.backend not in {"mock", "tesollo"}:
             raise ValueError("backend must be 'mock' or 'tesollo'")
         if not 1 <= self.port <= 65535:
@@ -44,6 +49,8 @@ class Dg5fConfig(RobotConfig):
         if self.slave_id < 0:
             raise ValueError("slave_id must be non-negative")
         positive = {
+            "servo_rate_hz": self.servo_rate_hz,
+            "servo_max_velocity_deg_s": self.servo_max_velocity_deg_s,
             "max_speed_deg_s": self.max_speed_deg_s,
             "max_accel_deg_s2": self.max_accel_deg_s2,
             "response_time_s": self.response_time_s,
