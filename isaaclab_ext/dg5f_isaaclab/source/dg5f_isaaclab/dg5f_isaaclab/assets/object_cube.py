@@ -22,6 +22,10 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 # Standard Isaac Sim asset root (persistent.isaac.asset_root.cloud), not a fixed URL.
 DEX_CUBE_USD_PATH = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
 DEX_CUBE_VISUAL_PRIM = "/DexCube/visuals"
+# Edge of the stock asset's own visual bounds. spawn_visual_cuboid recomputes it from the USD
+# and prints it (native_edge_m=0.060000), so a changed asset shows up there instead of silently
+# mis-scaling anything derived from this constant.
+DEX_CUBE_NATIVE_EDGE_M = 0.06
 
 
 def _aligned_bounds(prim: Usd.Prim) -> Gf.Range3d:

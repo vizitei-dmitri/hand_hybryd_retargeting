@@ -41,8 +41,21 @@ class HeldSuccessTracker:
         self.steps_in_tolerance += in_tolerance.long()
         newly = (self.consecutive >= self.required_steps) & ~self.succeeded
         self.succeeded |= newly
-        self.success_step[newly] = step[newly]
+        # With goal resampling `newly` fires once per completed goal, so keep the first one:
+        # success_step is the time to the FIRST success of the episode.
+        first = newly & (self.success_step < 0)
+        self.success_step[first] = step[first]
         return newly
+
+    def new_goal(self, env_ids=None):
+        """Start another goal inside the same episode: only the hold state is cleared.
+
+        Episode statistics (entered, steps_in_tolerance, success_step) keep accumulating, so
+        the per-episode logs still describe the whole episode rather than the last goal.
+        """
+        ids = slice(None) if env_ids is None else env_ids
+        self.consecutive[ids] = 0
+        self.succeeded[ids] = False
 
     def reset(self, env_ids=None):
         ids = slice(None) if env_ids is None else env_ids

@@ -28,6 +28,8 @@ sysid = load_module("dg5f_test_sysid", PACKAGE / "assets/sysid.py")
 control = load_module("dg5f_test_control", PACKAGE / "tasks/direct/dg5f_cube/control.py")
 goals = load_module("dg5f_test_goals", PACKAGE / "tasks/direct/dg5f_cube/goals.py")
 success = load_module("dg5f_test_success", PACKAGE / "tasks/direct/dg5f_cube/success.py")
+grasp = load_module("dg5f_test_grasp", PACKAGE / "tasks/direct/dg5f_cube/grasp.py")
+grasp_cache = load_module("dg5f_test_grasp_cache", PACKAGE / "assets/grasp_cache.py")
 CONTROL_DT = 2 / 120  # DG5FCubeEnvCfg: sim.dt=1/120, decimation=2
 JOINTS = tuple(j.get("name") for j in ET.parse(ROOT.parents[1] / "models/dg5f/urdf/dg5f_right.urdf").getroot()
                .findall("joint") if j.get("type") != "fixed")
@@ -245,6 +247,153 @@ class RewardV2Tests(unittest.TestCase):
         # Even a cube already inside the tolerance needs a full new hold after reset.
         self.assertEqual(self.feed(tracker, [1] * (steps - 1)), [False] * (steps - 1))
         self.assertFalse(tracker.succeeded[0])
+
+
+class GraspQualityTests(unittest.TestCase):
+    """lambda_min(G G^T) must separate a real grip from fingertips merely cradling the cube."""
+
+    OPPOSED = [[0.03, 0, 0], [-0.03, 0.02, 0], [-0.03, -0.02, 0], [0, 0, 0], [0, 0, 0]]
+    BOWL = [[0.0, 0, -0.03], [0.02, 0, -0.03], [-0.02, 0, -0.03], [0, 0, 0], [0, 0, 0]]
+    THREE = [[True, True, True, False, False]]
+
+    def quality(self, offsets, mask):
+        gramian = grasp.grasp_gramian(torch.tensor([offsets]), torch.tensor(mask))
+        return grasp.gramian_min_eigenvalue(gramian)[0].item()
+
+    def test_a_opposed_beats_bowl(self):
+        # A one-sided contact set cannot resist a wrench along its open direction.
+        self.assertGreater(self.quality(self.OPPOSED, self.THREE), 1e3 * self.quality(self.BOWL, self.THREE))
+
+    def test_b_too_few_contacts_is_singular(self):
+        # eigvalsh leaves ~1e-9 of numerical noise on a singular Gramian; the reward's margin
+        # (grasp_quality_margin, 1e-4) is five orders of magnitude above that, so it is harmless.
+        for mask in ([[True, False, False, False, False]], [[True, True, False, False, False]]):
+            self.assertLess(self.quality(self.OPPOSED, mask), 1e-7)
+
+    def test_c_gramian_is_symmetric_psd(self):
+        gramian = grasp.grasp_gramian(torch.tensor([self.OPPOSED]), torch.tensor(self.THREE))
+        torch.testing.assert_close(gramian, gramian.transpose(-1, -2))
+        self.assertGreaterEqual(torch.linalg.eigvalsh(gramian).amin().item(), -1e-12)
+
+    def test_d_reward_is_bounded_and_ema_tracks(self):
+        reward = grasp.GraspQualityReward(1e-4, 0.5, 0.97)
+        offsets = torch.tensor([self.OPPOSED, self.BOWL])
+        mask = torch.tensor(self.THREE * 2)
+        for _ in range(50):
+            value, lambda_min = reward(offsets, mask)
+        self.assertTrue(torch.all(value.abs() <= 0.5 + 1e-9))
+        # The opposed grasp must still rank above the bowl after normalisation.
+        self.assertGreater(value[0].item(), value[1].item())
+        self.assertGreater(lambda_min[0].item(), lambda_min[1].item())
+
+    def test_e_rejects_bad_parameters(self):
+        for margin, clip, ema in ((1e-4, 0.5, 0.0), (1e-4, 0.5, 1.0), (1e-4, 0.0, 0.97), (-1.0, 0.5, 0.97)):
+            with self.assertRaises(ValueError):
+                grasp.GraspQualityReward(margin, clip, ema)
+
+
+class GoalCurriculumTests(unittest.TestCase):
+    def test_a_haar_band_recovers_uniform_so3(self):
+        # Widening the band to [0, pi] must reproduce uniform SO(3), whose mean angle is 126.47 deg.
+        angles = goals.sample_angles_haar(200000, 0.0, math.pi, "cpu")
+        self.assertAlmostEqual(math.degrees(angles.mean().item()), 126.47, delta=0.6)
+
+    def test_b_band_is_respected(self):
+        angles = goals.sample_angles_haar(20000, math.radians(20), math.radians(30), "cpu")
+        self.assertGreaterEqual(math.degrees(angles.amin().item()), 20.0 - 1e-6)
+        self.assertLessEqual(math.degrees(angles.amax().item()), 30.0 + 1e-6)
+
+    def test_c_rejects_invalid_band(self):
+        for lo, hi in ((0.5, 0.2), (-0.1, 1.0), (0.0, 4.0)):
+            with self.assertRaises(ValueError):
+                goals.sample_angles_haar(8, lo, hi, "cpu")
+
+    def test_d_goals_obey_limit_and_minimum(self):
+        current = torch.zeros(4096, 4)
+        current[:, 0] = 1
+        quats, frontier = goals.sample_curriculum_goals(
+            current, math.radians(10), math.radians(40), math.radians(10), 0.6, 0.3)
+        error = torch.rad2deg(goals.quat_angle(quats, current))
+        self.assertGreaterEqual(error.amin().item(), 10.0 - 1e-3)
+        self.assertLessEqual(error.amax().item(), 40.0 + 1e-3)
+        torch.testing.assert_close(quats.norm(dim=-1), torch.ones(4096), atol=1e-5, rtol=0)
+        self.assertAlmostEqual(frontier.float().mean().item(), 0.6, delta=0.03)
+        # Frontier goals are the ones whose success rate drives promotion, so they must be hard.
+        self.assertGreaterEqual(math.degrees(torch.deg2rad(error[frontier]).amin().item()), 30.0 - 1e-3)
+
+    def test_e_goals_are_relative_to_the_current_orientation(self):
+        current = goals.uniform_quat(2048, "cpu")
+        quats, _ = goals.sample_curriculum_goals(
+            current, math.radians(10), math.radians(40), math.radians(10), 0.6, 0.3)
+        error = torch.rad2deg(goals.quat_angle(quats, current))
+        self.assertGreaterEqual(error.amin().item(), 10.0 - 1e-3)
+        self.assertLessEqual(error.amax().item(), 40.0 + 1e-3)
+
+    def test_f_degenerate_band_does_not_crash(self):
+        current = torch.zeros(64, 4)
+        current[:, 0] = 1
+        quats, _ = goals.sample_curriculum_goals(
+            current, math.radians(10), math.radians(10), math.radians(10), 0.6, 0.3)
+        self.assertEqual(tuple(quats.shape), (64, 4))
+
+
+class GraspCacheTests(unittest.TestCase):
+    NAMES = JOINTS
+
+    def cache_arrays(self, count=4):
+        import numpy as np
+        return {
+            "q": np.zeros((count, len(self.NAMES)), dtype=np.float32),
+            "q_cmd": np.zeros((count, len(self.NAMES)), dtype=np.float32),
+            "cube_pos": np.zeros((count, 3), dtype=np.float32),
+            "cube_quat": np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (count, 1)),
+            "joint_names": np.array(self.NAMES),
+        }
+
+    def write(self, arrays):
+        import numpy as np
+        handle = tempfile.NamedTemporaryFile(suffix=".npz", delete=False)
+        handle.close()
+        np.savez(handle.name, **arrays)
+        return handle.name
+
+    def test_a_round_trip(self):
+        cache = grasp_cache.load_grasp_cache(self.write(self.cache_arrays()), self.NAMES)
+        self.assertEqual(len(cache), 4)
+        self.assertEqual(cache.joint_names, tuple(self.NAMES))
+        self.assertEqual(len(cache.sha256), 64)
+
+    def test_b_rejects_wrong_joint_order(self):
+        arrays = self.cache_arrays()
+        import numpy as np
+        arrays["joint_names"] = np.array(tuple(reversed(self.NAMES)))
+        with self.assertRaises(ValueError):
+            grasp_cache.load_grasp_cache(self.write(arrays), self.NAMES)
+
+    def test_c_rejects_missing_array_and_empty_cache(self):
+        arrays = self.cache_arrays()
+        del arrays["cube_quat"]
+        with self.assertRaises(ValueError):
+            grasp_cache.load_grasp_cache(self.write(arrays), self.NAMES)
+        with self.assertRaises(ValueError):
+            grasp_cache.load_grasp_cache(self.write(self.cache_arrays(0)), self.NAMES)
+
+    def test_d_rejects_non_finite_and_unnormalised_quat(self):
+        arrays = self.cache_arrays()
+        arrays["q"][0, 0] = float("nan")
+        with self.assertRaises(ValueError):
+            grasp_cache.load_grasp_cache(self.write(arrays), self.NAMES)
+        arrays = self.cache_arrays()
+        arrays["cube_quat"][:] = 0.3  # norm 0.6; note [0.5]*4 would be unit-norm
+        with self.assertRaises(ValueError):
+            grasp_cache.load_grasp_cache(self.write(arrays), self.NAMES)
+
+    def test_e_rejects_out_of_limit_joints(self):
+        arrays = self.cache_arrays()
+        arrays["q"][0, 0] = 100.0
+        limits = [(-1.0, 1.0)] * len(self.NAMES)
+        with self.assertRaises(ValueError):
+            grasp_cache.load_grasp_cache(self.write(arrays), self.NAMES, limits)
 
 
 if __name__ == "__main__":

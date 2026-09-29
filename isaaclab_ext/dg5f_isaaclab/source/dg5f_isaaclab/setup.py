@@ -25,7 +25,7 @@ INSTALL_REQUIRES = [
 setup(
     name="dg5f_isaaclab",
     packages=find_packages(),
-    package_data={"dg5f_isaaclab": ["assets/data/*.json", "assets/data/*.pt"]},
+    package_data={"dg5f_isaaclab": ["assets/data/*.json", "assets/data/*.pt", "assets/data/*.npz"]},
     author=EXTENSION_TOML_DATA["package"]["author"],
     maintainer=EXTENSION_TOML_DATA["package"]["maintainer"],
     url=EXTENSION_TOML_DATA["package"]["repository"],

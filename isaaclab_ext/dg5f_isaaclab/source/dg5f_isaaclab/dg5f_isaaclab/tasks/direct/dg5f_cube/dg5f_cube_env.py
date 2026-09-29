@@ -14,18 +14,22 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
+from isaaclab.markers import VisualizationMarkers
+from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import (
     quat_apply, quat_apply_inverse, quat_conjugate, quat_error_magnitude, quat_mul, sample_uniform,
 )
 
+from dg5f_isaaclab.assets.grasp_cache import load_grasp_cache
 from dg5f_isaaclab.assets.dg5f import (
     DG5F_HARDWARE_MODEL, DG5F_JOINT_EFFORT_LIMITS, DG5F_JOINT_LIMITS, DG5F_NO_LOAD_SPEED_RPM,
     DG5F_RATED_JOINT_TORQUE_NM, DG5F_STALL_JOINT_TORQUE_NM,
 )
 from .dg5f_cube_env_cfg import DG5FCubeEnvCfg
 from .control import ActionDelayQueue, position_targets
-from .goals import sample_goal_quats
+from .goals import sample_curriculum_goals, sample_goal_quats
+from .grasp import GraspQualityReward
 from .success import HeldSuccessTracker, hold_steps, orientation_state_reward
 
 
@@ -37,6 +41,7 @@ EPISODE_LOG_KEYS = (
     "episode_initial_orientation_error_deg", "episode_final_orientation_error_deg",
     "episode_mean_orientation_error_deg", "episode_min_orientation_error_deg",
     "episode_time_in_tolerance_fraction", "episode_time_to_held_success_s", "episode_length_s",
+    "episode_goals_completed", "episode_mean_tip_contacts",
 )
 
 
@@ -56,6 +61,13 @@ class DG5FCubeEnv(DirectRLEnv):
             raise ValueError("Invalid target angle range")
         if sum(value * value for value in cfg.target_axis_in_palm) <= 0:
             raise ValueError("Target rotation axis must be nonzero")
+        needs_contacts = (cfg.tip_contact_reward or cfg.palm_contact_penalty or cfg.grasp_quality_scale
+                          or cfg.max_time_without_tip_contact_s is not None)
+        if needs_contacts and not cfg.enable_contact_sensors:
+            raise ValueError("Contact-based reward/termination terms require enable_contact_sensors")
+        if cfg.enable_contact_sensors:
+            # Must be set before the articulation spawns in _setup_scene.
+            cfg.robot_cfg.spawn.activate_contact_sensors = True
         super().__init__(cfg, render_mode, **kwargs)
         # The Direct integer space shorthand is unbounded in Isaac Lab 2.3.2.
         self.single_action_space = gym.spaces.Box(-1.0, 1.0, shape=(cfg.action_space,))
@@ -101,7 +113,10 @@ class DG5FCubeEnv(DirectRLEnv):
 
         self.palm_pos_w = self.hand.data.body_pos_w[:, self.palm_id].clone()
         self.palm_quat_w = self.hand.data.body_quat_w[:, self.palm_id].clone()
-        self.cube_anchor = torch.tensor(cfg.cube_position_in_palm, device=self.device).expand(self.num_envs, -1)
+        # clone(): an expand() view shares one row of memory, so per-env anchors (grasp cache,
+        # grasp searches) cannot be written into it.
+        self.cube_anchor = torch.tensor(
+            cfg.cube_position_in_palm, device=self.device).expand(self.num_envs, -1).clone()
         self.goal_quat = torch.zeros((self.num_envs, 4), device=self.device)
         self.goal_quat[:, 0] = 1
         self.actions = torch.zeros((self.num_envs, cfg.action_space), device=self.device)
@@ -122,6 +137,37 @@ class DG5FCubeEnv(DirectRLEnv):
         assert required == cfg.success_hold_steps, (required, cfg.success_hold_steps)
         self.success = HeldSuccessTracker(self.num_envs, required, self.device)
         self.success_eligible = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        # Goals completed within the current episode (the consecutive-successes metric).
+        self.goals_completed = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # Always defined so the log schema does not depend on the contact sensors being on.
+        self.tip_contact_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.tip_in_contact = torch.zeros((self.num_envs, len(self.tip_ids)), dtype=torch.bool, device=self.device)
+        self.palm_contact_force = torch.zeros(self.num_envs, device=self.device)
+        self.tip_contact_sum = torch.zeros(self.num_envs, device=self.device)
+        self.steps_without_tip_contact = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.grasp_quality = GraspQualityReward(
+            cfg.grasp_quality_margin, cfg.grasp_quality_clip, cfg.grasp_quality_ema)
+        # A plain float: goals are resampled on every completion, and reading a device scalar
+        # there would force a host sync on most steps.
+        self.goal_angle_limit_rad = math.radians(cfg.goal_curriculum_start_deg)
+        self.goal_at_frontier = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.frontier_attempts = torch.zeros((), device=self.device)
+        self.frontier_successes = torch.zeros((), device=self.device)
+        if cfg.goal_curriculum:
+            if not cfg.goal_curriculum_start_deg >= cfg.min_initial_goal_error_deg:
+                raise ValueError("goal_curriculum_start_deg must be at least min_initial_goal_error_deg")
+            if not 0 < cfg.goal_frontier_fraction + cfg.goal_inside_fraction <= 1:
+                raise ValueError("goal frontier/inside fractions must sum into (0, 1]")
+        self.grasp_cache = None
+        if cfg.grasp_cache_path is not None:
+            cache = load_grasp_cache(cfg.grasp_cache_path, cfg.actuated_joint_names, DG5F_JOINT_LIMITS)
+            self.grasp_cache = {
+                "joint_pos": torch.as_tensor(cache.joint_pos, device=self.device),
+                "joint_command": torch.as_tensor(cache.joint_command, device=self.device),
+                "cube_pos": torch.as_tensor(cache.cube_pos, device=self.device),
+                "cube_quat": torch.as_tensor(cache.cube_quat, device=self.device),
+            }
+            print(f"[DG5F] grasp_cache n={len(cache)} sha256={cache.sha256[:16]} source={cache.source}")
         self.error_sum = torch.zeros(self.num_envs, device=self.device)
         self.error_min = torch.full((self.num_envs,), math.inf, device=self.device)
         self.initial_orientation_error = torch.zeros(self.num_envs, device=self.device)
@@ -173,6 +219,23 @@ class DG5FCubeEnv(DirectRLEnv):
         self.scene.rigid_objects["cube"] = self.cube
         light = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light.func("/World/Light", light)
+        self.contact_sensors = {}
+        if self.cfg.enable_contact_sensors:
+            # Six cube-filtered sensors (5 tips + palm), not one per link as in contact_audit.py:
+            # the reward only needs "is a tip on the cube" and "is the palm carrying it".
+            for link in list(self.cfg.fingertip_body_names) + [self.cfg.palm_body_name]:
+                sensor = ContactSensor(ContactSensorCfg(
+                    prim_path=f"/World/envs/env_.*/Robot/{link}",
+                    filter_prim_paths_expr=["/World/envs/env_.*/Cube"]))
+                self.scene.sensors[f"contact_{link}"] = sensor
+                self.contact_sensors[link] = sensor
+        # Created here, not after super().__init__(): __init__ ends with _compute_state(), which
+        # already draws them. /Visuals is outside /World/envs, so clone_environments ignores it.
+        self.goal_markers = None
+        self.status_markers = None
+        if self.cfg.goal_marker:
+            self.goal_markers = VisualizationMarkers(self.cfg.goal_marker_cfg)
+            self.status_markers = VisualizationMarkers(self.cfg.goal_marker_status_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
         assert actions.shape == (self.num_envs, self.cfg.action_space)
@@ -203,14 +266,23 @@ class DG5FCubeEnv(DirectRLEnv):
         self.orientation_error = quat_error_magnitude(self.cube_quat, self.goal_quat)
         self.cube_distance_from_palm = torch.linalg.vector_norm(self.cube_pos, dim=-1)
         self.palm_region_distance = torch.linalg.vector_norm(self.cube_pos - self.cube_anchor, dim=-1)
+        tips = self.hand.data.body_pos_w[:, self.tip_ids] - self.palm_pos_w[:, None, :]
+        self.tip_pos_palm = quat_apply_inverse(
+            self.palm_quat_w[:, None, :].expand(-1, len(self.tip_ids), -1).reshape(-1, 4),
+            tips.reshape(-1, 3),
+        ).view(self.num_envs, len(self.tip_ids), 3)
+        if self.contact_sensors:
+            forces = torch.stack(
+                [s.data.force_matrix_w[:, 0, 0].norm(dim=-1) for s in self.contact_sensors.values()], dim=-1)
+            self.tip_in_contact = forces[:, :len(self.tip_ids)] > self.cfg.tip_contact_force_n
+            self.tip_contact_count = self.tip_in_contact.sum(dim=-1)
+            self.palm_contact_force = forces[:, len(self.tip_ids)]
 
     def _get_observations(self):
         self._compute_state()
-        tip_positions = self.hand.data.body_pos_w[:, self.tip_ids] - self.palm_pos_w[:, None, :]
-        tip_positions = quat_apply_inverse(
-            self.palm_quat_w[:, None, :].expand(-1, 5, -1).reshape(-1, 4),
-            tip_positions.reshape(-1, 3),
-        ).reshape(self.num_envs, 15)
+        # Palm-frame fingertip positions, computed once in _compute_state and shared with the
+        # grasp-quality reward (which runs before observations in the DirectRLEnv step order).
+        tip_positions = self.tip_pos_palm.reshape(self.num_envs, -1)
         obs = torch.cat((
             self.hand.data.joint_pos[:, self.joint_ids],
             self.hand.data.joint_vel[:, self.joint_ids],
@@ -221,13 +293,53 @@ class DG5FCubeEnv(DirectRLEnv):
             self.joint_command,
         ), dim=-1)
         assert obs.shape == (self.num_envs, self.cfg.observation_space), obs.shape
+        if self.goal_markers is not None:
+            self._visualize_goals()
         return {"policy": obs}
+
+    def _visualize_goals(self):
+        """GUI only: the goal orientation as a ghost cube above the hand, plus an error lamp.
+
+        Called from _get_observations so it runs once per control step on the freshly computed
+        state, after resets have already resampled the goals.
+        """
+        offset = torch.tensor(self.cfg.goal_marker_offset_in_palm, device=self.device).expand(self.num_envs, 3)
+        ghost_pos = self.palm_pos_w + quat_apply(self.palm_quat_w, offset)
+        # goal_quat is a palm-frame orientation; the marker is placed in world coordinates.
+        self.goal_markers.visualize(ghost_pos, quat_mul(self.palm_quat_w, self.goal_quat))
+        # Lamp clear of the ghost along the same palm normal.
+        lamp_offset = offset.clone()
+        lamp_offset[:, 0] += self.cfg.cube_size_m
+        index = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        index[self.orientation_error <= self.cfg.goal_marker_near_scale * self.cfg.success_tolerance_rad] = 1
+        index[self.orientation_error <= self.cfg.success_tolerance_rad] = 2
+        self.status_markers.visualize(
+            self.palm_pos_w + quat_apply(self.palm_quat_w, lamp_offset), marker_indices=index)
 
     def _get_dones(self):
         self._compute_state()
-        fallen = (self.cube_distance_from_palm > self.cfg.max_cube_distance_from_palm_m) | (
-            self.cube.data.root_pos_w[:, 2] - self.scene.env_origins[:, 2] < self.cfg.min_cube_world_height_m
-        )
+        far = self.cube_distance_from_palm > self.cfg.max_cube_distance_from_palm_m
+        low = self.cube.data.root_pos_w[:, 2] - self.scene.env_origins[:, 2] < self.cfg.min_cube_world_height_m
+        fallen = far | low
+        # Which criterion fires is the first thing to know when everything terminates at once.
+        self.termination_reasons = {"term/far_from_palm": far, "term/below_height": low,
+                                   "term/left_grasp_region": torch.zeros_like(far),
+                                   "term/lost_tip_contact": torch.zeros_like(far)}
+        # A fingertip grasp can genuinely be dropped; the 0.25 m cradle threshold never fired, which
+        # is why every policy so far logged drop_rate 0.000.
+        if self.cfg.max_cube_distance_from_grasp_m is not None:
+            left = self.palm_region_distance > self.cfg.max_cube_distance_from_grasp_m
+            self.termination_reasons["term/left_grasp_region"] = left
+            fallen |= left
+        if self.cfg.max_time_without_tip_contact_s is not None:
+            self.steps_without_tip_contact = torch.where(
+                self.tip_contact_count > 0,
+                torch.zeros_like(self.steps_without_tip_contact),
+                self.steps_without_tip_contact + 1)
+            limit = round(self.cfg.max_time_without_tip_contact_s / self.step_dt)
+            lost = self.steps_without_tip_contact > limit
+            self.termination_reasons["term/lost_tip_contact"] = lost
+            fallen |= lost
         timeout = self.episode_length_buf >= self.max_episode_length - 1
         return fallen, timeout
 
@@ -238,6 +350,12 @@ class DG5FCubeEnv(DirectRLEnv):
         first_success = self.success.update(in_tolerance, self.episode_length_buf)
         self.error_sum += self.orientation_error
         self.error_min = torch.minimum(self.error_min, self.orientation_error)
+        self.tip_contact_sum += self.tip_contact_count.float()
+        # Read before the terms: the effort penalties below use them (reward v2 penalised actions,
+        # not effort, which is what the 0.4 Nm rating actually constrains).
+        computed = self.hand.data.computed_torque[:, self.joint_ids].detach()
+        applied = self.hand.data.applied_torque[:, self.joint_ids].detach()
+        joint_velocity = self.hand.data.joint_vel[:, self.joint_ids].detach()
         terms = {
             "orientation_state_reward": orientation_state_reward(
                 self.orientation_error, self.cfg.orientation_state_scale, math.radians(self.cfg.orientation_sigma_deg)),
@@ -249,11 +367,40 @@ class DG5FCubeEnv(DirectRLEnv):
             "success_bonus": self.cfg.success_bonus * first_success.float(),
             "drop_penalty": -self.cfg.fall_penalty * self.reset_terminated.float(),
         }
+        if self.cfg.tip_contact_reward:
+            # AnyRotate (2024): reward enough fingertips on the object, not a distance proxy.
+            terms["tip_contact_reward"] = self.cfg.tip_contact_reward * (
+                self.tip_contact_count >= self.cfg.min_tip_contacts).float()
+        if self.cfg.palm_contact_penalty:
+            # The cradle is the cheap solution; this is what forbids it.
+            terms["palm_contact_penalty"] = -self.cfg.palm_contact_penalty * (
+                self.palm_contact_force > self.cfg.tip_contact_force_n).float()
+        if self.cfg.grasp_quality_scale:
+            quality, lambda_min = self.grasp_quality(
+                self.tip_pos_palm - self.cube_pos[:, None, :], self.tip_in_contact)
+            self.grasp_lambda_min = lambda_min
+            terms["grasp_quality_reward"] = self.cfg.grasp_quality_scale * quality
+        if self.cfg.pose_penalty_scale:
+            deviation = (self.joint_command - self.grasp_command[:, self.active_indices]).abs()
+            terms["pose_penalty"] = -self.cfg.pose_penalty_scale * deviation.mean(dim=-1)
+        if self.cfg.torque_penalty_scale:
+            # Mean, not sum, so the weight does not depend on the DOF count.
+            terms["torque_penalty"] = -self.cfg.torque_penalty_scale * applied.square().mean(dim=-1)
+        if self.cfg.work_penalty_scale:
+            terms["work_penalty"] = -self.cfg.work_penalty_scale * (
+                applied * joint_velocity).sum(dim=-1).square()
         reward = sum(terms.values())
         self.previous_orientation_error.copy_(self.orientation_error)
         self.episode_returns += reward
-        computed = self.hand.data.computed_torque[:, self.joint_ids].detach()
-        applied = self.hand.data.applied_torque[:, self.joint_ids].detach()
+        # Counted before _resample_goals overwrites goal_at_frontier for these envs.
+        self.frontier_successes += (first_success & self.goal_at_frontier).sum()
+        # A promotion here applies to the goals handed out just below, which is intended.
+        self._update_goal_curriculum()
+        # Only after the reward for THIS step is settled: a completed goal is replaced in place.
+        # previous_orientation_error is re-seeded with the new error, otherwise the next step's
+        # progress term would read the goal switch as a huge regression and punish the success.
+        if self.cfg.resample_goal_on_success and bool(first_success.any()):
+            self._resample_goals(first_success.nonzero(as_tuple=False).squeeze(-1))
         # Full signed tensors are available to debug tools; scalar means go to PPO.
         self.extras["computed_torque"] = computed
         self.extras["applied_torque"] = applied
@@ -268,7 +415,15 @@ class DG5FCubeEnv(DirectRLEnv):
             "orientation_error": self.orientation_error.mean(),
             "orientation_error_deg": torch.rad2deg(self.orientation_error).mean(),
             "cube_distance_from_palm": self.cube_distance_from_palm.mean(),
-            "held_success_rate": self.success.succeeded.float().mean(),
+            "held_success_rate": (self.goals_completed > 0).float().mean(),
+            "goals_completed": self.goals_completed.float().mean(),
+            **{name: mask.float().mean() for name, mask in self.termination_reasons.items()},
+            "cube_drift_from_grasp_mm": 1000 * self.palm_region_distance.mean(),
+            "goal_angle_limit_deg": torch.tensor(
+                math.degrees(self.goal_angle_limit_rad), device=self.device),
+            "tip_contacts": self.tip_contact_count.float().mean(),
+            "tip_contacts_ok_fraction": (self.tip_contact_count >= self.cfg.min_tip_contacts).float().mean(),
+            "palm_contact_fraction": (self.palm_contact_force > self.cfg.tip_contact_force_n).float().mean(),
             "in_tolerance_fraction": in_tolerance.float().mean(),
             "consecutive_tolerance_steps": self.success.consecutive.float().mean(),
             "current_orientation_error_deg": torch.rad2deg(self.orientation_error).mean(),
@@ -305,6 +460,58 @@ class DG5FCubeEnv(DirectRLEnv):
             log[f"torque_saturation_fraction/{name}"] = saturated[:, index].mean()
         return reward
 
+    def _sample_goals_for(self, env_ids: torch.Tensor, reference_quat: torch.Tensor) -> torch.Tensor:
+        """Goals for env_ids, measured from reference_quat, honouring the curriculum if enabled."""
+        if not self.cfg.goal_curriculum:
+            return sample_goal_quats(
+                reference_quat, self.cfg.target_orientation_mode, self.cfg.target_axis_in_palm,
+                self.cfg.target_angle_range_deg, math.radians(self.cfg.min_initial_goal_error_deg),
+            )
+        quats, at_frontier = sample_curriculum_goals(
+            reference_quat, math.radians(self.cfg.min_initial_goal_error_deg),
+            self.goal_angle_limit_rad, math.radians(self.cfg.goal_curriculum_band_deg),
+            self.cfg.goal_frontier_fraction, self.cfg.goal_inside_fraction,
+        )
+        self.goal_at_frontier[env_ids] = at_frontier
+        # Every issued frontier goal is an attempt; completions are counted in _get_rewards.
+        self.frontier_attempts += at_frontier.sum()
+        return quats
+
+    def _update_goal_curriculum(self):
+        """Widen the goal limit once the frontier band is being solved (POISE: promote at 40%)."""
+        if not self.cfg.goal_curriculum:
+            return
+        if int(self.common_step_counter) % self.cfg.goal_curriculum_check_steps:
+            return
+        attempts = self.frontier_attempts.item()
+        if attempts < self.cfg.goal_curriculum_min_samples:
+            return
+        rate = self.frontier_successes.item() / max(attempts, 1.0)
+        if rate >= self.cfg.goal_curriculum_promote_rate:
+            limit = min(self.goal_angle_limit_rad + math.radians(self.cfg.goal_curriculum_step_deg),
+                        math.radians(self.cfg.goal_curriculum_max_deg))
+            self.goal_angle_limit_rad = limit
+            logger.info("Goal curriculum promoted to %.1f deg (frontier success %.2f over %d goals)",
+                        math.degrees(limit), rate, int(attempts))
+        self.frontier_attempts.zero_()
+        self.frontier_successes.zero_()
+
+    def _resample_goals(self, env_ids: torch.Tensor):
+        """Hand a new goal to envs that just completed one, without resetting the episode.
+
+        The new goal is sampled against the cube's CURRENT orientation with the same minimum
+        error, so every goal demands a real rotation from wherever the cube now sits.
+        """
+        current_quat = self.cube_quat[env_ids]
+        self.goal_quat[env_ids] = self._sample_goals_for(env_ids, current_quat)
+        new_error = quat_error_magnitude(current_quat, self.goal_quat[env_ids])
+        self.orientation_error[env_ids] = new_error
+        # Seeded with the new error so the progress term sees no jump across the goal switch.
+        self.previous_orientation_error[env_ids] = new_error
+        self.goals_completed[env_ids] += 1
+        self.success_eligible[env_ids] = new_error >= self.cfg.success_tolerance_rad
+        self.success.new_goal(env_ids)
+
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.hand._ALL_INDICES
@@ -313,11 +520,15 @@ class DG5FCubeEnv(DirectRLEnv):
         completed = env_ids[self.episode_length_buf[env_ids] > 0]
         # Per-episode values (possibly empty) under every key, every step: RSL-RL takes its keys
         # from the first step of an iteration and concatenates, i.e. an episode-weighted mean.
-        success = self.success.succeeded[completed]
+        # `succeeded` is cleared on every new goal, so the episode's first success is the one
+        # recorded in success_step (-1 when the episode never reached a held success).
+        success = self.success.success_step[completed] >= 0
         steps = self.episode_length_buf[completed].float()
         episode_log = {
             "episode_reward": self.episode_returns[completed],
-            "episode_held_success_rate": success.float(),
+            "episode_held_success_rate": (self.goals_completed[completed] > 0).float(),
+            "episode_goals_completed": self.goals_completed[completed].float(),
+            "episode_mean_tip_contacts": self.tip_contact_sum[completed] / steps,
             "episode_entered_tolerance_rate": self.success.entered[completed].float(),
             "episode_drop_rate": self.reset_terminated[completed].float(),
             "episode_initial_orientation_error_deg": torch.rad2deg(self.initial_orientation_error[completed]),
@@ -332,6 +543,14 @@ class DG5FCubeEnv(DirectRLEnv):
         self.extras.setdefault("log", {}).update(episode_log)
         super()._reset_idx(env_ids)
         count = len(env_ids)
+        if self.grasp_cache is not None:
+            # Draw a validated fingertip grasp per episode. Diverse initialisation is the single
+            # ingredient POISE (2026) credits with post-drop recovery 33.8% -> 72.9%.
+            picks = torch.randint(self.grasp_cache["joint_pos"].shape[0], (count,), device=self.device)
+            self.hand.data.default_joint_pos[env_ids[:, None], self.joint_ids] = \
+                self.grasp_cache["joint_pos"][picks]
+            self.grasp_command[env_ids] = self.grasp_cache["joint_command"][picks]
+            self.cube_anchor[env_ids] = self.grasp_cache["cube_pos"][picks]
         joint_pos = self.hand.data.default_joint_pos[env_ids].clone()
         noise = self.cfg.reset_joint_position_noise_rad
         joint_pos += sample_uniform(-noise, noise, joint_pos.shape, device=self.device)
@@ -364,10 +583,7 @@ class DG5FCubeEnv(DirectRLEnv):
         # The cube restarts aligned with the palm: identity in the palm frame.
         initial_quat = torch.zeros((count, 4), device=self.device)
         initial_quat[:, 0] = 1
-        self.goal_quat[env_ids] = sample_goal_quats(
-            initial_quat, self.cfg.target_orientation_mode, self.cfg.target_axis_in_palm,
-            self.cfg.target_angle_range_deg, math.radians(self.cfg.min_initial_goal_error_deg),
-        )
+        self.goal_quat[env_ids] = self._sample_goals_for(env_ids, initial_quat)
         initial_error = quat_error_magnitude(initial_quat, self.goal_quat[env_ids])
         assert torch.all(initial_error >= math.radians(self.cfg.min_initial_goal_error_deg) - 1e-4)
         self.previous_orientation_error[env_ids] = initial_error
@@ -375,6 +591,9 @@ class DG5FCubeEnv(DirectRLEnv):
         # Defensive: never a free bonus for a goal already within tolerance.
         self.success_eligible[env_ids] = initial_error >= self.cfg.success_tolerance_rad
         self.success.reset(env_ids)
+        self.goals_completed[env_ids] = 0
         self.error_sum[env_ids] = 0
+        self.tip_contact_sum[env_ids] = 0
+        self.steps_without_tip_contact[env_ids] = 0
         self.error_min[env_ids] = math.inf
         self.episode_returns[env_ids] = 0
