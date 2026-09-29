@@ -20,6 +20,7 @@ class Dg5fConfig(RobotConfig):
     control_mode: str = "legacy"
     servo_rate_hz: float = 60.0
     servo_max_velocity_deg_s: float = 120.0
+    servo_max_acceleration_deg_s2: float = 720.0
     control_smoothing: bool = True
     max_speed_deg_s: float = 30.0
     max_accel_deg_s2: float = 60.0
@@ -51,6 +52,7 @@ class Dg5fConfig(RobotConfig):
         positive = {
             "servo_rate_hz": self.servo_rate_hz,
             "servo_max_velocity_deg_s": self.servo_max_velocity_deg_s,
+            "servo_max_acceleration_deg_s2": self.servo_max_acceleration_deg_s2,
             "max_speed_deg_s": self.max_speed_deg_s,
             "max_accel_deg_s2": self.max_accel_deg_s2,
             "response_time_s": self.response_time_s,

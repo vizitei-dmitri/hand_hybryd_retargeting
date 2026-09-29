@@ -89,6 +89,7 @@ class Dg5fLeRobotBridge(Node):
         self.declare_parameter("control_mode", "legacy")
         self.declare_parameter("servo_rate_hz", 60.0)
         self.declare_parameter("servo_max_velocity_deg_s", 120.0)
+        self.declare_parameter("servo_max_acceleration_deg_s2", 720.0)
         self.declare_parameter("command_rate_hz", 50.0)
         self.declare_parameter("state_rate_hz", 30.0)
         self.declare_parameter("command_timeout", 0.35)
@@ -162,6 +163,7 @@ class Dg5fLeRobotBridge(Node):
             control_mode=str(self.get_parameter("control_mode").value),
             servo_rate_hz=float(self.get_parameter("servo_rate_hz").value),
             servo_max_velocity_deg_s=float(self.get_parameter("servo_max_velocity_deg_s").value),
+            servo_max_acceleration_deg_s2=float(self.get_parameter("servo_max_acceleration_deg_s2").value),
             ip=str(self.get_parameter("ip").value),
             port=int(self.get_parameter("port").value),
             slave_id=int(self.get_parameter("slave_id").value),
@@ -539,6 +541,8 @@ class Dg5fLeRobotBridge(Node):
             desired_deg=np.asarray(desired_deg, dtype=np.float64),
             now=now,
             operator_target_deg=operator_target_deg,
+            trajectory_braking=(self._robot.command_shaper.telemetry.get("trajectory_braking")
+                                if self._control_mode == "servo" else None),
             **self._contact_for_guard(effective, now),
         )
         self._last_compliance_time = now
@@ -1044,6 +1048,10 @@ class Dg5fLeRobotBridge(Node):
                           else [float("nan")] * 20), previous_q_cmd=command,
                 q_cmd=command, q_measured=measured.tolist(), raw_servo_step=[0.0] * 20,
                 post_contact_cmd=command, post_guard_cmd=command,
+                desired_velocity_deg_s=[0.0] * 20,
+                commanded_velocity_deg_s=controller.velocity_deg_s.tolist(),
+                acceleration_deg_s2=[0.0] * 20, acceleration_limited=[False] * 20,
+                max_acceleration_deg_s2=controller.max_acceleration_deg_s2,
                 tracking_error=np.abs(np.asarray(command) - measured).tolist(),
                 dt=dt, actual_rate_hz=1 / dt if dt > 0 else None, max_step_deg=0.0,
                 low_level_submitted=controller.effective_command().tolist(),
@@ -1061,6 +1069,10 @@ class Dg5fLeRobotBridge(Node):
         post_contact = np.asarray(telemetry["post_contact_cmd"])
         post_violation = desired_delta * (post_contact - previous) < -1e-8
         moved_away = np.asarray(telemetry["distance_after"]) > np.asarray(telemetry["distance_before"]) + 1e-8
+        braking = np.asarray(telemetry.get("trajectory_braking", [False] * 20))
+        planned_step = np.abs(np.asarray(telemetry["raw_servo_step"]))
+        post_violation &= ~(braking & (np.abs(post_contact - previous) <= planned_step + 1e-8))
+        moved_away &= ~(braking & (np.abs(np.asarray(telemetry["q_cmd"]) - previous) <= planned_step + 1e-8))
         telemetry["post_contact_direction_violation"] = post_violation.tolist()
         telemetry["command_moved_away_from_target"] = moved_away.tolist()
         for index in np.flatnonzero(post_violation | moved_away | np.asarray(telemetry["direction_violation"])):
@@ -1259,6 +1271,7 @@ class Dg5fLeRobotBridge(Node):
         snapshot["control_mode"] = self._control_mode
         snapshot["servo_rate_hz"] = self.get_parameter("servo_rate_hz").value
         snapshot["servo_max_velocity_deg_s"] = self.get_parameter("servo_max_velocity_deg_s").value
+        snapshot["servo_max_acceleration_deg_s2"] = self.get_parameter("servo_max_acceleration_deg_s2").value
         snapshot["control_smoothing"] = self.get_parameter("control_smoothing").value
         snapshot["command_profile"] = "smoothed" if snapshot["control_smoothing"] else "direct_guarded"
         if self._control_mode == "servo":

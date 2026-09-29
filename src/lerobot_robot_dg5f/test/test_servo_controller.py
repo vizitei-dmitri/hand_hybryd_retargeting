@@ -19,21 +19,23 @@ def tick(servo, target, now):
     return servo.effective_command()
 
 
-def test_persistent_command_does_not_follow_stalled_feedback_and_reverses_immediately():
+def test_persistent_command_does_not_follow_stalled_feedback_and_brakes_on_reversal():
     servo = controller()
     for index in range(60):
         tick(servo, 90, (index + 1) / 60)
         servo.observe(np.zeros(20))  # Motor never moves.
-    assert servo.effective_command()[6] == pytest.approx(30)
-    assert tick(servo, -90, 61 / 60)[6] == pytest.approx(29.5)
+    assert servo.effective_command()[6] == pytest.approx(29.6)
+    assert tick(servo, -90, 61 / 60)[6] == pytest.approx(29.9)
+    assert servo.velocity_deg_s[6] == pytest.approx(18)
     assert servo.telemetry['max_step_deg'] <= 0.5 + 1e-12
 
 
 def test_small_steps_limits_fixed_joint_and_stalled_scheduler():
     servo = controller()
-    assert tick(servo, 0.01, 1)[6] == pytest.approx(0.01)
+    assert 0 < tick(servo, 0.01, 1)[6] <= 0.01
+    initial = servo.effective_command()[6]
     command = tick(servo, 999, 10)  # No nine-second catch-up jump.
-    assert command[6] == pytest.approx(0.51)
+    assert 0 < command[6] - initial <= 0.5
     assert command[16] == 0
     assert np.all(command <= UPPER_LIMITS_DEG)
     assert np.all(command >= LOWER_LIMITS_DEG)
@@ -42,7 +44,7 @@ def test_small_steps_limits_fixed_joint_and_stalled_scheduler():
     assert servo.telemetry['actual_rate_hz'] == 1 / 9
     previous = command.copy()
     command = tick(servo, 999, 10.001)
-    assert np.max(command - previous) == pytest.approx(0.03)
+    assert 0 < np.max(command - previous) <= 0.03
 
 
 def test_tracking_warning_requires_same_joint_continuously_and_rearms_after_clear():
@@ -73,7 +75,7 @@ def test_guard_runs_after_limiter_and_commits_only_accepted_output(monkeypatch):
     calls = []
     monkeypatch.setattr(robot.backend, 'send_positions', lambda q: calls.append(q.copy()))
     def freeze(q):
-        assert q[6] == 0.5
+        assert q[6] == pytest.approx(0.2)
         return np.zeros(20)
     robot.servo_tick(np.full(20, 90), guard=freeze, now=1)
     assert robot.command_shaper.effective_command()[6] == 0

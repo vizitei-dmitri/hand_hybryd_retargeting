@@ -216,6 +216,7 @@ class AdaptiveCurrentGuard:
         pair_gradients_m_deg: np.ndarray | None = None,
         contact_stamp_s: float | None = None,
         operator_target_deg: np.ndarray | None = None,
+        trajectory_braking: np.ndarray | None = None,
     ) -> CurrentGuardDecision:
         currents = np.asarray(current_ma, dtype=np.float64)
         measured = np.asarray(measured_deg, dtype=np.float64)
@@ -238,6 +239,9 @@ class AdaptiveCurrentGuard:
         operator = None if operator_target_deg is None else np.asarray(operator_target_deg, dtype=np.float64)
         if operator is not None and (operator.shape != effective.shape or not np.all(np.isfinite(operator))):
             raise ValueError("operator target must contain finite joint positions")
+        braking = np.zeros(self.joint_count, dtype=bool) if trajectory_braking is None else np.asarray(trajectory_braking, dtype=bool)
+        if braking.shape != effective.shape:
+            raise ValueError("trajectory braking must contain one flag per joint")
         if not math.isfinite(now):
             raise ValueError("current guard timestamp must be finite")
 
@@ -441,7 +445,13 @@ class AdaptiveCurrentGuard:
             # retreat. Clamp to the interval from accepted command to real intent.
             # This also prevents stale opening anchors from overshooting intent.
             candidate = target.copy()
-            target = np.clip(target, np.minimum(effective, operator), np.maximum(effective, operator))
+            lower, upper = np.minimum(effective, operator), np.maximum(effective, operator)
+            # On a target reversal the acceleration-limited trajectory may
+            # still brake in the old direction. Admit only that bounded proposal;
+            # retain real operator intent for contact and all load calculations.
+            lower[braking] = np.minimum(lower[braking], desired[braking])
+            upper[braking] = np.maximum(upper[braking], desired[braking])
+            target = np.clip(target, lower, upper)
             for index in np.flatnonzero(np.abs(candidate - target) > 1e-8):
                 direction_reasons[index] = "BLOCKED_CONTACT_OFFSET_REVERSAL"
             if object_decision is not None:

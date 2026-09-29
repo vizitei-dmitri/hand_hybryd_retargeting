@@ -9,7 +9,10 @@ observations. The ROS bridge converts the existing radian-valued
 
 The default `control_mode=legacy` preserves the existing path. The optional
 `control_mode=servo` adds a 60 Hz persistent position command with a 120 deg/s
-limit before the existing current guard. See [launch instructions, telemetry
+velocity limit and a configurable 720 deg/s² acceleration limit before the
+existing current guard. Set `DG5F_SERVO_MAX_ACCEL_DEG_S2=480|720|960` when launching
+with stack.sh; see [acceleration behavior, tests and hardware commands](../../docs/DG5F_SERVO_ACCELERATION.md).
+See [launch instructions, telemetry
 and the legacy audit](../../docs/DG5F_SERVO_CONTROL.md).
 The [hardware regression report](../../docs/DG5F_SERVO_HARDWARE_FIX.md) explains
 the contact-offset fix, stage diagnostics and speed comparison commands.

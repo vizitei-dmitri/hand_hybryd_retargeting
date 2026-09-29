@@ -31,7 +31,8 @@ def advance(robot, guard, target, now, *, measured=None, current=None, correct_i
         decision = guard.update(
             desired_deg=proposed, effective_deg=previous, measured_deg=measured,
             current_ma=current, now=now,
-            operator_target_deg=target if correct_intent else None)
+            operator_target_deg=target if correct_intent else None,
+            trajectory_braking=robot.command_shaper.telemetry["trajectory_braking"] if correct_intent else None)
         assert not decision.trip and not decision.stall_trip
         decisions.append(decision)
         return decision.target_deg
@@ -56,8 +57,8 @@ def test_reproduces_old_wrong_stage_then_corrects_target_plus70_command_minus50(
     old_robot, old_guard = make_robot(initial, 30), make_guard()
     released_contact_offset(old_guard, initial)
     old, _ = advance(old_robot, old_guard, target, 1/60, correct_intent=False)
-    assert old_robot.command_shaper.telemetry['q_proposed'][6] == -49.5
-    assert old[6] == -50.5  # Existing contact formula, wrong input semantics.
+    assert old_robot.command_shaper.telemetry['q_proposed'][6] == -49.8
+    assert old[6] == -50.5  # Downstream legacy offset can bypass trajectory acceleration.
     old_robot.disconnect()
 
     robot, guard = make_robot(initial, 30), make_guard()
@@ -86,8 +87,9 @@ def test_every_joint_reversal_cross_zero_and_rapid_targets(joint):
         target[joint] = value
         previous = robot.command_shaper.effective_command()
         command, _ = advance(robot, guard, target, tick/60)
-        assert np.all((target - previous) * (command - previous) >= -1e-8)
-        assert np.all(np.abs(target-command) <= np.abs(target-previous) + 1e-8)
+        braking = np.asarray(robot.command_shaper.telemetry['trajectory_braking'])
+        assert np.all(((target - previous) * (command - previous) >= -1e-8) | braking)
+        assert np.all((np.abs(target-command) <= np.abs(target-previous) + 1e-8) | braking)
         assert np.max(np.abs(command-previous)) <= 2 + 1e-8
     robot.disconnect()
 
@@ -123,8 +125,14 @@ def test_contact_yield_uses_real_intent_and_cannot_self_release_or_ratchet():
     assert decision.diagnostics['object_contact_state'][1] == 'FREE'
     target[6] = 70
     previous = command.copy()
+    previous_velocity = robot.command_shaper.velocity_deg_s[6]
     command, _ = advance(robot, guard, target, 92/60, measured=command, current=np.zeros(20))
-    assert command[6] >= previous[6]
+    # The prior opening may still brake outward for a few ticks; it must be
+    # planned deceleration, never a stale offset inventing a retreat.
+    if command[6] < previous[6]:
+        assert robot.command_shaper.telemetry['trajectory_braking'][6]
+        assert abs(robot.command_shaper.velocity_deg_s[6]) < abs(previous_velocity)
+        assert previous_velocity < 0
     robot.disconnect()
 
 
@@ -135,7 +143,7 @@ def test_free_offset_cannot_overshoot_a_nearby_operator_target():
     released_contact_offset(guard, initial)
     command, decision = advance(robot, guard, target, 1/60)
     assert -50 <= command[6] <= -49
-    assert command[6] == -49
+    assert command[6] == pytest.approx(-49.8)
     assert guard._object_contact.fingers['index'].resume_offset is None
     assert decision.diagnostics['command_direction_reason'][6] == 'NONE'
     robot.disconnect()
@@ -144,8 +152,10 @@ def test_free_offset_cannot_overshoot_a_nearby_operator_target():
 @pytest.mark.parametrize('speed,step', [(60,1), (120,2), (180,3)])
 def test_requested_hardware_comparison_speeds(speed, step):
     robot = make_robot(speed=speed)
-    robot.servo_tick(np.full(20,70), guard=lambda q:q, now=1/60)
-    assert robot.command_shaper.effective_command()[6] == pytest.approx(step)
+    for tick in range(1, 21):
+        previous = robot.command_shaper.effective_command()
+        robot.servo_tick(np.full(20,70), guard=lambda q:q, now=tick/60)
+    assert robot.command_shaper.effective_command()[6] - previous[6] == pytest.approx(step)
     assert robot.config.servo_rate_hz == 60
     robot.disconnect()
 

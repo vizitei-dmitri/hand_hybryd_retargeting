@@ -17,6 +17,7 @@ dg5f_lerobot_bridge:
     control_mode: legacy  # legacy path and defaults are preserved
     servo_rate_hz: 60.0
     servo_max_velocity_deg_s: 120.0
+    servo_max_acceleration_deg_s2: 720.0
     command_rate_hz: 50.0  # legacy only
     state_rate_hz: 30.0
     command_timeout: 0.35

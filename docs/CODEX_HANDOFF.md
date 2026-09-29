@@ -1,8 +1,26 @@
 # Handoff для следующей сессии Codex
 
-Дата: 2026-09-28, timezone Europe/Moscow. Проект: `/home/yoba/Documents/work/hand_hybryd_retargeting`.
-Пользователь общается по-русски. Последний запрос — узко исправить замедление index
-в FREE после contact по bundle 18:05:11. Аппаратная проверка этого патча предстоит.
+Дата: 2026-09-29, timezone Europe/Moscow. Проект: `/home/yoba/Documents/work/hand_hybryd_retargeting`.
+Пользователь общается по-русски. Последний запрос — сохранить hardware-stable
+checkpoint и отдельным коммитом добавить servo acceleration720deg/s².
+
+## Актуально: stable checkpoint + acceleration
+
+Сначала читать [acceleration report](DG5F_SERVO_ACCELERATION.md).
+Stable commit41b9b7e + локальный annotated tag `dg5f-servo-stable-pre-accel`.
+Hardware bundle18:30:01_157769 подтвердил stable pre-accel:0DISARM/SDK errors,
+max420mA. Отдельный commit `feat(dg5f): add acceleration-limited servo trajectory`
+добавляет trajectory acceleration:
+60Hz/120deg/s/720deg/s², env DG5F_SERVO_MAX_ACCEL_DEG_S2. Persistent velocity,
+braking-aware desired speed, actual jitter dt, reset velocity on HOLD/ARM.
+Guard/physical safety может остановить сразу. Direction projection принимает
+bounded planned reversal braking, сохраняя real operator target для contact.
+Recorder unchanged; новые telemetry fields идут автоматически в servo JSON.
+Тесты после accel:273passed +3 прежних baseline failures;22 новых accel unit
+tests и bridge reverse/HOLD test PASS. Hybrid524×20 побитно равен stable.
+29 сентября перед финальным commit повторены acceleration+bridge:54 passed.
+Артефакты debug_runs/acceleration_validation/. Hardware с accel не запускали.
+Не push. IsaacLab working changes оставлены вне обоих коммитов.
 
 ## Обновление: index FREE slowdown (2026-09-28)
 
@@ -63,7 +81,7 @@ Servo ARM больше не strictly passive: hardware preflight passive, но h
 
 ## В первую очередь
 
-1. Рабочая ветка **`feature/dg5f-servo-control`**. Все описанные изменения находятся в working tree, **не закоммичены**. HEAD — `9490086d11f362f939d8f0ee87324aa82b540dca`. НЕ делать reset/checkout файлов из HEAD: это уничтожит текущую реализацию и предыдущие исправления.
+1. Рабочая ветка **`feature/dg5f-servo-control`**. Stable DG5F checkpoint — **41b9b7e**, tag **dg5f-servo-stable-pre-accel**; acceleration идёт следующим отдельным коммитом. Старые упоминания HEAD9490086/незакоммиченных DG5F files ниже — история. Unrelated IsaacLab working changes не сбрасывать.
 2. Сначала читать [актуальный отчёт](DG5F_SERVO_RUNTIME_POLICY.md). [Hardware fix](DG5F_SERVO_HARDWARE_FIX.md) и [первый servo audit](DG5F_SERVO_CONTROL.md) — история; их описание отключения/возобновления servo уже частично устарело.
 3. Не изменять Dex Hybrid / Vector / DexPilot / MANO / coordinate transforms / joint mapping / limits. Пользователь это несколько раз явно запретил. Изменяем только слой после готового q_target[20].
 4. Сохранять legacy path, предыдущие contact-offset corrections, telemetry и `debug-record-teleop`.

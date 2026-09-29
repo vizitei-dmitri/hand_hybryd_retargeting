@@ -115,7 +115,7 @@ def test_arm_hold_arrival_loss_and_return_need_only_one_arm(bridge, monkeypatch,
     assert node._runtime_state() == 'ACTIVE'
     np.testing.assert_array_equal(controller.command_pose_deg, measured)
     node._send_latest()
-    assert sends[-1][6] == pytest.approx(-23)  # 120 deg/s / 60 Hz.
+    assert sends[-1][6] == pytest.approx(-24.8)  # First tick: 720 deg/s² from rest.
     held = controller.command_pose_deg.copy()
     physical = sends[-1].copy()
     if loss == 'tracking_false':
@@ -143,7 +143,7 @@ def test_arm_hold_arrival_loss_and_return_need_only_one_arm(bridge, monkeypatch,
     target(node, -60)
     assert node._armed and node._runtime_state() == 'ACTIVE'
     node._send_latest()
-    assert sends[-1][6] == pytest.approx(physical[6] - 2)
+    assert sends[-1][6] == pytest.approx(physical[6] - .2)
     assert np.max(np.abs(sends[-1] - physical)) <= 2 + 1e-9
     assert events.count('ARM_REQUESTED') == events.count('ARMED') == 1
     assert events.count('TRACKING_RECOVERED') == 2
@@ -226,7 +226,8 @@ def test_timer_streams_independently_of_ten_hz_input_and_logs_every_send(bridge,
     assert 70 <= len(sends) <= 105
     rate = (len(sends) - 1) / (sends[-1][0] - sends[0][0])
     assert 50 <= rate <= 70
-    assert max(np.max(np.abs(b[1] - a[1])) for a, b in zip(sends, sends[1:])) <= 0.5 + 1e-9
+    # Real timer jitter changes dt; speed remains <=30 deg/s.
+    assert all(row['max_step_deg'] <= 30 * row['limiter_dt'] + 1e-8 for row in records)
     assert len(records) >= len(sends) - 3
     assert all(len(records[-1][key]) == 20 for key in
                ('q_target', 'q_cmd', 'q_measured', 'tracking_error'))
@@ -250,7 +251,7 @@ def test_overcurrent_is_local_and_never_disarms(bridge, monkeypatch):
     target(node, 60)
     node._send_servo_tick(now)
     assert sends[-1][6] == 0
-    assert sends[-1][10] == pytest.approx(0.5)  # Unloaded joint remains free.
+    assert sends[-1][10] == pytest.approx(0.2)  # Unloaded joint accelerates freely.
     current[6] = 900
     node._send_servo_tick(now + 0.02)
     count = len(sends)
@@ -270,7 +271,7 @@ def test_latest_target_replaces_previous_and_stale_input_holds(bridge, monkeypat
     target(node, -80)
     assert not sends
     node._send_latest()
-    assert sends[-1][6] == pytest.approx(-0.5)
+    assert sends[-1][6] == pytest.approx(-0.2)
     node._last_command_time = time.monotonic() - 1
     node._send_latest()
     assert node._armed
@@ -289,7 +290,7 @@ def test_tracking_error_warning_does_not_disarm_or_reseed(bridge, monkeypatch):
         node._send_servo_tick(now + index / 60)
     assert node._armed
     assert len(sends) == 65
-    assert sends[-1][6] == pytest.approx(32.5)
+    assert sends[-1][6] == pytest.approx(32.1)
     assert any('>10 deg for >=300 ms' in msg for msg in warnings)
 
 
@@ -505,3 +506,45 @@ def test_hold_emits_full_diagnostics_and_resumes_on_new_command_without_tracking
     node._send_latest()
     resumed = node._robot.command_shaper.command_pose_deg
     assert np.max(np.abs(resumed-held)) <= 0.5+1e-8
+
+
+def test_accelerated_reverse_survives_real_guard_and_tracking_hold(bridge, monkeypatch):
+    node, _ = bridge
+    s = node._robot.command_shaper
+    s.max_velocity_deg_s = 120
+    events, records = [], []
+    monkeypatch.setattr(node, '_event', lambda name, **kw: events.append(name))
+    monkeypatch.setattr(node._servo_pub, 'publish', lambda m: records.append(json.loads(m.data)))
+    now = time.monotonic()
+    target(node, 70)
+    for tick in range(12):
+        node._send_servo_tick(now + tick / 60)
+    assert s.velocity_deg_s[6] == pytest.approx(120)
+    target(node, -70)
+    velocities = []
+    previous_v = 120
+    for tick in range(12, 34):
+        node._send_servo_tick(now + tick / 60)
+        v = s.velocity_deg_s[6]
+        assert abs(v - previous_v) <= 12 + 1e-6
+        velocities.append(v)
+        previous_v = v
+    assert velocities[0] == pytest.approx(108)
+    assert any(abs(v) < 1e-6 for v in velocities)
+    assert min(velocities) == pytest.approx(-120)
+    assert records[12]['trajectory_braking'][6]
+    assert not any(name in ('COMMAND_MOVED_AWAY_FROM_TARGET',
+                           'COMMAND_DIRECTION_VIOLATION_BLOCKED') for name in events)
+    held = s.command_pose_deg.copy()
+    node._enter_tracking_grace(now + 34 / 60)
+    assert not np.any(s.velocity_deg_s)
+    node._publish_servo_hold(now + 35 / 60)
+    assert records[-1]['commanded_velocity_deg_s'] == [0.] * 20
+    np.testing.assert_array_equal(s.command_pose_deg, held)
+    # Simulated monotonic clock so the recovery target follows the HOLD timestamp.
+    monkeypatch.setattr(node, '_now_seconds', lambda: now + 36 / 60)
+    target(node, 70)
+    assert node._runtime_state() == 'ACTIVE'
+    node._send_servo_tick(now + 36 / 60)
+    assert s.velocity_deg_s[6] == pytest.approx(12)
+    assert s.command_pose_deg[6] - held[6] == pytest.approx(.2)

@@ -26,7 +26,8 @@ def advance(robot, guard, target, measured, currents, now):
     def safety(proposal):
         d = guard.update(current_ma=currents, measured_deg=measured,
                          effective_deg=robot.command_shaper.command_pose_deg,
-                         desired_deg=proposal, operator_target_deg=target, now=now)
+                         desired_deg=proposal, operator_target_deg=target, now=now,
+                         trajectory_braking=robot.command_shaper.telemetry["trajectory_braking"])
         decisions.append(d)
         return GuardedServoCommand(d.target_deg, d.diagnostics['physical_lower_deg'],
                                    d.diagnostics['physical_upper_deg'])
@@ -59,8 +60,9 @@ def test_free_progress_uses_full_servo_step_for_every_finger(finger, joint, curr
             decision = advance(robot, guard, target, measured, currents, tick / 60)
             d = decision.diagnostics
             assert d['joint_tracking_scale'][joint] == pytest.approx(1)
-            assert robot.command_shaper.command_pose_deg[joint] - previous[joint] == pytest.approx(2)
-            assert robot.command_shaper.effective_command()[joint] - previous[joint] == pytest.approx(2)
+            expected_step = min(tick * .2, 2)
+            assert robot.command_shaper.command_pose_deg[joint] - previous[joint] == pytest.approx(expected_step)
+            assert robot.command_shaper.effective_command()[joint] - previous[joint] == pytest.approx(expected_step)
             assert d['joint_limiting_reason'][joint] == 'NONE'
             assert not d['joint_object_contact_evidence'][joint]
             assert state.state == 'FREE' and state.resume_offset is None
@@ -108,11 +110,13 @@ def test_real_contact_holds_then_release_restores_free_servo(finger, joint):
     events = []
     try:
         for tick in range(1, 31):
+            previous = robot.command_shaper.command_pose_deg.copy()
             d = advance(robot, guard, target, measured, currents, tick / 60)
             events.extend(d.object_contact_events)
             assert abs(robot.command_shaper.effective_command()[joint] - measured[joint]) <= d.diagnostics['joint_lead_budget_deg'][joint] + 1e-8
         assert guard._object_contact.fingers[finger].state == 'CONTACT_HOLD'
-        assert d.diagnostics['joint_tracking_scale'][joint] < .2
+        assert d.diagnostics['joint_tracking_scale'][joint] < 1
+        assert d.target_deg[joint] <= previous[joint]  # HOLD/yield, no added closure.
         assert any(e['event'] == 'OBJECT_CONTACT_LATCHED' for e in events)
         assert 'OBJECT_CONTACT_HOLD' in d.diagnostics['joint_limiting_reason'][joint]
         target[joint] = -10  # Explicit opening releases the actual contact.
@@ -121,12 +125,16 @@ def test_real_contact_holds_then_release_restores_free_servo(finger, joint):
         assert any(e['event'] == 'OBJECT_CONTACT_RELEASED' for e in d.object_contact_events)
         assert guard._object_contact.fingers[finger].resume_offset is None
         target[joint] = 66
-        for tick in range(32, 92):
+        for tick in range(32, 152):
             previous = robot.command_shaper.command_pose_deg.copy()
+            previous_v = robot.command_shaper.velocity_deg_s[joint]
             measured = previous.copy(); measured[joint] -= 3
             d = advance(robot, guard, target, measured, currents, tick / 60)
             step = robot.command_shaper.command_pose_deg[joint] - previous[joint]
-            assert 0 <= step <= 2 + 1e-8
+            assert abs(step) <= 2 + 1e-8
+            if step < -1e-8:
+                assert robot.command_shaper.telemetry['trajectory_braking'][joint]
+                assert abs(robot.command_shaper.velocity_deg_s[joint]) < abs(previous_v)
             assert guard._object_contact.fingers[finger].state == 'FREE'
         assert d.diagnostics['joint_tracking_scale'][joint] > .99
         assert robot.command_shaper.command_pose_deg[joint] == pytest.approx(66)

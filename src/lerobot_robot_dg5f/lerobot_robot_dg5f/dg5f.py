@@ -82,6 +82,7 @@ class Dg5f(Robot):
                 disabled_positions_deg=disabled_by_index,
                 rate_hz=config.servo_rate_hz,
                 max_velocity_deg_s=config.servo_max_velocity_deg_s,
+                max_acceleration_deg_s2=config.servo_max_acceleration_deg_s2,
                 **shaper_kwargs,
             )
         else:
