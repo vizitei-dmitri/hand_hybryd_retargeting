@@ -23,3 +23,15 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
     },
 )
+
+# Reward v4: a stream of fixed 20 deg goals that must be reached, braked into and held.
+# Registered separately from the task above so that task and its night run stay reproducible.
+gym.register(
+    id="DG5F-Cube-Stream-Direct-v0",
+    entry_point=f"{__name__}.dg5f_cube_env:DG5FCubeEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.dg5f_cube_env_cfg:DG5FCubeStreamEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPOStreamRunnerCfg",
+    },
+)

@@ -10,6 +10,30 @@ def orientation_state_reward(error_rad: torch.Tensor, scale: float, sigma_rad: f
     return scale * torch.exp(-(error_rad / sigma_rad).square())
 
 
+def orientation_baseline_reward(error_rad: torch.Tensor, scale: float, sigma_rad: float,
+                                reference_rad: float) -> torch.Tensor:
+    """Dense orientation reward centred so that sitting at the goal-stream distance earns zero.
+
+    scale * (exp(-error / sigma) - exp(-reference / sigma)): positive when closer to the goal than
+    the distance every goal starts at, negative when farther, strongly positive at the goal.
+
+    The reward-v3 form scale * exp(-(error / sigma)^2) fails this task twice over. It is far too
+    narrow for goals that always start 20 deg away (at sigma = 10 deg a 20 deg error is worth 1.8%
+    of the peak), and raising its coefficient to compensate would pay the policy for simply staying
+    where it was reset -- 1440 steps of positive reward for doing nothing. Subtracting the value at
+    the starting distance removes that option by construction.
+    """
+    return scale * (torch.exp(-error_rad / sigma_rad) - math.exp(-reference_rad / sigma_rad))
+
+
+def orientation_reward_table(scale: float, sigma_rad: float, reference_rad: float,
+                             degrees=(0.0, 2.5, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 45.0, 90.0)):
+    """(error_deg, reward) pairs, printed before training so the shaping is visible, not assumed."""
+    errors = torch.tensor([math.radians(d) for d in degrees])
+    values = orientation_baseline_reward(errors, scale, sigma_rad, reference_rad)
+    return list(zip(degrees, values.tolist()))
+
+
 def hold_steps(hold_time_s: float, control_dt: float) -> int:
     """Consecutive control steps covering hold_time_s (rounded, at least 1)."""
     if hold_time_s <= 0 or control_dt <= 0:

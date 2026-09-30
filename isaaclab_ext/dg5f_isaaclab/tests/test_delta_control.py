@@ -30,6 +30,7 @@ goals = load_module("dg5f_test_goals", PACKAGE / "tasks/direct/dg5f_cube/goals.p
 success = load_module("dg5f_test_success", PACKAGE / "tasks/direct/dg5f_cube/success.py")
 grasp = load_module("dg5f_test_grasp", PACKAGE / "tasks/direct/dg5f_cube/grasp.py")
 grasp_cache = load_module("dg5f_test_grasp_cache", PACKAGE / "assets/grasp_cache.py")
+curriculum = load_module("dg5f_test_curriculum", PACKAGE / "tasks/direct/dg5f_cube/curriculum.py")
 CONTROL_DT = 2 / 120  # DG5FCubeEnvCfg: sim.dt=1/120, decimation=2
 JOINTS = tuple(j.get("name") for j in ET.parse(ROOT.parents[1] / "models/dg5f/urdf/dg5f_right.urdf").getroot()
                .findall("joint") if j.get("type") != "fixed")
@@ -398,3 +399,315 @@ class GraspCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GoalStreamTests(unittest.TestCase):
+    """The fixed-20-degree goal stream (reward v4). Section 26 of the experiment spec."""
+
+    ANGLE = math.radians(20.0)
+    AXIS = (1.0, 0.0, 0.0)
+
+    def delta_axis_angle(self, reference, goal):
+        """Rotation taking reference to goal, as (axis, angle)."""
+        conjugate = reference * torch.tensor([1.0, -1.0, -1.0, -1.0])
+        delta = goals.quat_multiply(conjugate, goal)
+        # Canonical hemisphere, so the axis sign is the rotation's and not the quaternion's.
+        delta = torch.where(delta[:, :1] < 0, -delta, delta)
+        angle = 2.0 * torch.acos(delta[:, 0].clamp(-1.0, 1.0))
+        axis = delta[:, 1:] / torch.sin(0.5 * angle).clamp_min(1e-9)[:, None]
+        return axis, angle
+
+    def references(self, count, seed=0):
+        torch.manual_seed(seed)
+        return goals.uniform_quat(count, "cpu")
+
+    def test_a_every_goal_is_exactly_the_stream_angle_away(self):
+        for stage in goals.STREAM_STAGES:
+            reference = self.references(2048, seed=hash(stage) % 1000)
+            goal = goals.sample_fixed_angle_goals(reference, self.ANGLE, stage, self.AXIS)
+            distance = goals.quat_angle(reference, goal)
+            self.assertLess(float((distance - self.ANGLE).abs().max()), 1e-5,
+                            f"stage {stage} does not hold the fixed angle")
+
+    def test_b_quaternion_sign_does_not_change_the_distance(self):
+        reference = self.references(512, seed=7)
+        goal = goals.sample_fixed_angle_goals(reference, self.ANGLE, "C", self.AXIS)
+        base = goals.quat_angle(reference, goal)
+        # q and -q are the same rotation, so every sign combination must give the same geodesic.
+        for reference_sign, goal_sign in ((1, -1), (-1, 1), (-1, -1)):
+            flipped = goals.quat_angle(reference_sign * reference, goal_sign * goal)
+            torch.testing.assert_close(flipped, base)
+
+    def test_c_goal_is_referenced_from_the_pose_passed_in(self):
+        # The env passes the cube's ACTUAL orientation, so tracking error cannot accumulate into a
+        # target that is no longer the requested distance away. A goal measured from identity
+        # instead would be 20 deg from identity, not from the achieved pose.
+        reference = self.references(256, seed=11)
+        goal = goals.sample_fixed_angle_goals(reference, self.ANGLE, "C", self.AXIS)
+        identity = torch.zeros_like(reference)
+        identity[:, 0] = 1.0
+        from_identity = goals.quat_angle(identity, goal)
+        self.assertGreater(float((from_identity - self.ANGLE).abs().mean()), math.radians(5.0))
+
+    def test_d_stage_a_uses_the_primary_axis_with_both_signs(self):
+        reference = self.references(1024, seed=3)
+        goal = goals.sample_fixed_angle_goals(reference, self.ANGLE, "A", self.AXIS)
+        axis, angle = self.delta_axis_angle(reference, goal)
+        torch.testing.assert_close(angle, torch.full((1024,), self.ANGLE), atol=1e-5, rtol=0)
+        primary = torch.tensor(self.AXIS)
+        alignment = (axis * primary).sum(dim=-1)
+        torch.testing.assert_close(alignment.abs(), torch.ones(1024), atol=1e-4, rtol=0)
+        self.assertTrue(bool((alignment > 0).any()) and bool((alignment < 0).any()), "sign is not random")
+
+    def test_e_stage_b_uses_the_three_principal_axes(self):
+        reference = self.references(3072, seed=5)
+        goal = goals.sample_fixed_angle_goals(reference, self.ANGLE, "B", self.AXIS)
+        axis, _ = self.delta_axis_angle(reference, goal)
+        magnitude = axis.abs()
+        # Exactly one component is +-1 and the other two vanish.
+        torch.testing.assert_close(magnitude.max(dim=-1).values, torch.ones(3072), atol=1e-4, rtol=0)
+        self.assertLess(float(magnitude.sum(dim=-1).max() - 1.0), 1e-4)
+        used = magnitude.argmax(dim=-1)
+        counts = torch.bincount(used, minlength=3).float() / 3072
+        self.assertTrue(torch.all(counts > 0.25), f"axes are not all used: {counts.tolist()}")
+
+    def test_f_stage_c_axes_are_approximately_uniform(self):
+        reference = self.references(8192, seed=13)
+        goal = goals.sample_fixed_angle_goals(reference, self.ANGLE, "C", self.AXIS)
+        axis, _ = self.delta_axis_angle(reference, goal)
+        # Uniform on the sphere: every component has mean 0, and E|cos| to any fixed axis is 0.5.
+        self.assertLess(float(axis.mean(dim=0).abs().max()), 0.05)
+        for component in range(3):
+            self.assertAlmostEqual(float(axis[:, component].abs().mean()), 0.5, delta=0.03)
+
+    def test_g_unknown_stage_is_rejected(self):
+        reference = self.references(4)
+        with self.assertRaises(ValueError):
+            goals.sample_fixed_angle_goals(reference, self.ANGLE, "D", self.AXIS)
+
+    def test_h_new_goal_clears_the_hold_but_keeps_episode_statistics(self):
+        # This is what "a new goal starts immediately, without resetting the episode" means for the
+        # success tracker: the dwell restarts, the per-episode counters do not.
+        steps = success.hold_steps(0.30, CONTROL_DT)
+        tracker = success.HeldSuccessTracker(1, steps, "cpu")
+        inside = torch.tensor([True])
+        for step in range(steps):
+            newly = tracker.update(inside, torch.tensor([step + 1]))
+        self.assertTrue(bool(newly[0]))
+        first_success_step = int(tracker.success_step[0])
+        tracker.new_goal(torch.tensor([0]))
+        self.assertEqual(int(tracker.consecutive[0]), 0)
+        self.assertFalse(bool(tracker.succeeded[0]))
+        self.assertTrue(bool(tracker.entered[0]), "episode statistics must survive a new goal")
+        self.assertEqual(int(tracker.steps_in_tolerance[0]), steps)
+        # A second success in the same episode must not overwrite the FIRST success time.
+        for step in range(steps):
+            tracker.update(inside, torch.tensor([steps + step + 1]))
+        self.assertEqual(int(tracker.success_step[0]), first_success_step)
+
+
+class OrientationBaselineRewardTests(unittest.TestCase):
+    """Section 6: the baseline-centred dense orientation term."""
+
+    SCALE, SIGMA, REFERENCE = 0.30, math.radians(15.0), math.radians(20.0)
+
+    def reward(self, degrees):
+        errors = torch.tensor([math.radians(d) for d in degrees])
+        return success.orientation_baseline_reward(errors, self.SCALE, self.SIGMA, self.REFERENCE)
+
+    def test_a_zero_exactly_at_the_stream_angle(self):
+        # "Do nothing at 20 deg" must be worth nothing, which is the whole purpose of the form.
+        self.assertAlmostEqual(float(self.reward([20.0])[0]), 0.0, places=7)
+
+    def test_b_sign_follows_being_closer_or_farther(self):
+        closer = self.reward([0.0, 2.5, 5.0, 10.0, 15.0])
+        farther = self.reward([25.0, 30.0, 45.0, 90.0])
+        self.assertTrue(torch.all(closer > 0), closer)
+        self.assertTrue(torch.all(farther < 0), farther)
+
+    def test_c_monotonically_decreasing_in_error(self):
+        values = self.reward([0, 2.5, 5, 10, 15, 20, 25, 30, 45, 90])
+        self.assertTrue(torch.all(values[1:] < values[:-1]))
+
+    def test_d_documented_anchors(self):
+        peak = self.SCALE * (1.0 - math.exp(-self.REFERENCE / self.SIGMA))
+        self.assertAlmostEqual(float(self.reward([0.0])[0]), peak, places=7)
+        # 0.30 * (1 - exp(-20/15)) with sigma = 15 deg and a 20 deg stream angle.
+        self.assertAlmostEqual(peak, 0.2209, places=4)
+
+    def test_e_table_covers_the_requested_errors(self):
+        table = success.orientation_reward_table(self.SCALE, self.SIGMA, self.REFERENCE)
+        self.assertEqual([deg for deg, _ in table], [0.0, 2.5, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 45.0, 90.0])
+
+
+class GraspDeficitPenaltyTests(unittest.TestCase):
+    """The one-sided grasp-defence penalties added after stage A degraded.
+
+    The formulas live inline in _get_rewards (they are two lines and need no helper), so these
+    tests restate them and pin the sizing that logs/reward_preflight/preflight_grasp_ref.json
+    measured. The point of pinning it: reward v3 failed because a weight was sized from an ASSUMED
+    deviation, and the stage-A failure happened because nobody had compared the dense terms'
+    magnitudes. If a scale is retuned, the arithmetic in the config comment must be retuned with it.
+    """
+
+    MIN_TIPS = 3
+    TIP_SCALE, QUALITY_SCALE, QUALITY_FLOOR = 0.015, 0.06, 0.25
+
+    def tip_penalty(self, counts):
+        counts = torch.tensor(counts)
+        deficit = (self.MIN_TIPS - counts).clamp_min(0).float()
+        return -self.TIP_SCALE * deficit
+
+    def quality_penalty(self, qualities):
+        shortfall = (self.QUALITY_FLOOR - torch.tensor(qualities)).clamp_min(0.0)
+        return -self.QUALITY_SCALE * shortfall
+
+    def test_a_intact_grasp_is_free(self):
+        # 3 or more tips and the warm-start quality must cost exactly nothing, or the term is a tax
+        # on the grasp itself -- reward v3's failure.
+        self.assertTrue(torch.all(self.tip_penalty([3, 4, 5]) == 0.0))
+        self.assertTrue(torch.all(self.quality_penalty([0.25, 0.255, 0.361, 0.5]) == 0.0))
+
+    def test_b_one_sided_never_pays(self):
+        self.assertTrue(torch.all(self.tip_penalty([0, 1, 2, 3, 4, 5]) <= 0.0))
+        self.assertTrue(torch.all(self.quality_penalty([-0.5, 0.0, 0.3, 1.0]) <= 0.0))
+
+    def test_c_graded_in_the_count_not_binary(self):
+        # The slide from 3 to 1 tip is what predicts the drop; the >=3 indicator would price the
+        # whole flicker band the same as a collapsing grasp.
+        values = self.tip_penalty([3, 2, 1, 0])
+        self.assertTrue(torch.all(values[1:] < values[:-1]))
+        self.assertAlmostEqual(float(values[1]), -0.015, places=7)
+        self.assertAlmostEqual(float(values[3]), -0.045, places=7)
+
+    def test_d_floor_sits_in_the_measured_bimodal_gap(self):
+        # grasp_quality is bimodal: warm-start p01..p25 = -0.245..-0.175, p50..p90 = +0.425..+0.500.
+        # The floor must select the degenerate mode and nothing in the intact mode, and it must do so
+        # for any value inside the gap -- that insensitivity is why the choice is safe.
+        degenerate = [-0.245, -0.220, -0.197, -0.175]
+        intact = [0.425, 0.450, 0.500]
+        for floor in (0.05, 0.15, 0.25, 0.35):
+            penalty = -self.QUALITY_SCALE * (floor - torch.tensor(degenerate)).clamp_min(0.0)
+            self.assertTrue(torch.all(penalty < 0), f"floor {floor} misses the degenerate mode")
+            free = -self.QUALITY_SCALE * (floor - torch.tensor(intact)).clamp_min(0.0)
+            self.assertTrue(torch.all(free == 0.0), f"floor {floor} taxes the intact mode")
+
+    def test_e_sizing_must_not_be_read_off_the_mean(self):
+        # The mistake this term was re-sized after: the penalty is clipped, hence convex, so the
+        # mean understates it whenever the value fluctuates. Jensen, on the measured bimodal sample.
+        sample = torch.tensor([-0.20] * 35 + [0.45] * 65)   # ~35% degenerate, as warm-start measures
+        from_distribution = float((-self.QUALITY_SCALE
+                                   * (self.QUALITY_FLOOR - sample).clamp_min(0.0)).mean())
+        from_mean = float(-self.QUALITY_SCALE
+                          * max(0.0, self.QUALITY_FLOOR - float(sample.mean())))
+        # The measured understatement was 6x (-7 per episode predicted from the mean, -43 measured).
+        self.assertLess(from_distribution, from_mean)
+        self.assertGreater(from_distribution / from_mean, 4.0)
+
+    def test_f_measured_balance_against_the_task_term(self):
+        # Per-step defence measured at each policy's occupancy, against orientation_state.
+        for defence, task, lower, upper in ((0.003, 0.017, 0.10, 0.25),    # zero, drop 0.031
+                                            (0.013, 0.035, 0.30, 0.45),    # warm, drop 0.039
+                                            (0.046, 0.051, 0.80, 1.00)):   # probe, drop 0.984
+            self.assertTrue(lower <= defence / task <= upper, f"{defence}/{task}")
+
+    def test_e_quality_deficit_requires_the_quality_term(self):
+        # grasp_quality_value only exists inside the grasp_quality_scale branch.
+        self.assertIn("grasp_quality_deficit_scale needs grasp_quality_scale", CFG_SOURCE)
+
+
+CFG_SOURCE = (Path(__file__).resolve().parents[1]
+              / "source/dg5f_isaaclab/dg5f_isaaclab/tasks/direct/dg5f_cube/dg5f_cube_env_cfg.py"
+              ).read_text()
+
+
+class BootstrapPhaseTests(unittest.TestCase):
+    """The 10 deg predecessor phase, and the invariants that keep it from becoming a curriculum."""
+
+    def setUp(self):
+        self.cfg = curriculum.STREAM_CURRICULUM
+        self.driver = (Path(__file__).resolve().parents[1] / "scripts/train_stream.py").read_text()
+
+    def test_a_bootstrap_angle_is_inside_demonstrated_capability(self):
+        # Measured: min_error 12.2 deg from a 20 deg start, i.e. ~8 deg of rotation, against a 5 deg
+        # tolerance. The bootstrap angle must be reachable, or the bonus still never fires.
+        demonstrated_rotation_deg = 20.0 - 12.2
+        tolerance_deg = 5.0
+        self.assertLessEqual(self.cfg.bootstrap_angle_deg - tolerance_deg, demonstrated_rotation_deg)
+        self.assertGreater(self.cfg.bootstrap_angle_deg, tolerance_deg)
+
+    def test_b_same_gate_at_both_angles(self):
+        # There is exactly one gate() and one set of thresholds; a separate, looser bootstrap gate is
+        # what would turn this into "trained on easy goals".
+        self.assertEqual(self.driver.count("def gate("), 1)
+        for field in ("first_goal_held_success_rate", "max_drop_rate", "goals_completed_per_episode"):
+            self.assertEqual(self.driver.count(f"cfg.{field}"), 1, field)
+
+    def test_c_bootstrap_must_return_to_the_target_angle(self):
+        # Passing the bootstrap sets phase to target and re-arms the gate; it must not advance a stage.
+        self.assertIn('state["phase"] = "target"', self.driver)
+        self.assertIn('state["consecutive_passes"] = 0', self.driver)
+        head = self.driver[:self.driver.index('state["phase"] = "target"')]
+        self.assertNotIn("STREAM_STAGES.index(stage)", head,
+                         "the bootstrap branch must come before any stage advance")
+
+    def test_d_both_angle_fields_move_together(self):
+        # The env asserts initial_error >= min_initial_goal_error_deg, so the angle alone trips it.
+        self.assertIn("env.goal_stream_angle_deg={angle}", self.driver)
+        self.assertIn("env.min_initial_goal_error_deg={angle}", self.driver)
+        evaluator = (Path(__file__).resolve().parents[1] / "scripts/eval_checkpoints.py").read_text()
+        self.assertIn("env_cfg.goal_stream_angle_deg = args_cli.goal_angle_deg", evaluator)
+        self.assertIn("env_cfg.min_initial_goal_error_deg = args_cli.goal_angle_deg", evaluator)
+
+    def test_e_evaluation_happens_at_the_training_angle(self):
+        self.assertIn('"--goal_angle_deg", str(angle)', self.driver)
+
+    def test_f_watchdog_does_not_compare_across_angles(self):
+        # A different angle is a different task; comparing deterministic progress across the switch
+        # would fire the watchdog on the angle change rather than on divergence.
+        self.assertIn('e.get("angle_deg", angle) == angle', self.driver)
+
+    def test_g_bootstrap_can_stall(self):
+        self.assertIn("cfg.bootstrap_max_iterations", self.driver)
+        self.assertGreater(self.cfg.bootstrap_max_iterations, 0)
+        self.assertLessEqual(self.cfg.bootstrap_max_iterations, self.cfg.stage_max_iterations)
+
+
+class NearGoalVelocityWindowTests(unittest.TestCase):
+    """The anti-overshoot window has to mean "near the goal" at every goal magnitude.
+
+    Found by changing the goal angle: with the window fixed at an absolute 10 deg and a 10 deg goal,
+    goal_velocity_penalty measured -0.0025 per step against -0.0001..-0.0006 at a 20 deg goal, i.e.
+    the term was braking the whole approach instead of the arrival.
+    """
+
+    ABSOLUTE_WINDOW_DEG = 10.0
+
+    def window(self, goal_angle_deg, goal_stream=True):
+        if not goal_stream:
+            return self.ABSOLUTE_WINDOW_DEG
+        return min(self.ABSOLUTE_WINDOW_DEG, 0.5 * goal_angle_deg)
+
+    def test_a_unchanged_at_the_prescribed_angle(self):
+        self.assertEqual(self.window(20.0), self.ABSOLUTE_WINDOW_DEG)
+
+    def test_b_shrinks_with_the_bootstrap_angle(self):
+        self.assertEqual(self.window(10.0), 5.0)
+
+    def test_c_never_covers_more_than_half_the_approach(self):
+        for angle in (6.0, 10.0, 15.0, 20.0, 45.0, 90.0):
+            self.assertLessEqual(self.window(angle), 0.5 * angle)
+
+    def test_d_still_leaves_room_outside_the_tolerance(self):
+        # A window at or below the 5 deg tolerance would make the term fire only where the goal is
+        # already reached, which is not anti-overshoot any more.
+        self.assertGreaterEqual(self.window(curriculum.STREAM_CURRICULUM.bootstrap_angle_deg), 5.0)
+
+    def test_e_not_applied_without_the_goal_stream(self):
+        # Without the stream the magnitude comes from target_angle_range_deg, so keying off
+        # goal_stream_angle_deg would be a wrong coupling.
+        self.assertEqual(self.window(10.0, goal_stream=False), self.ABSOLUTE_WINDOW_DEG)
+        source = (Path(__file__).resolve().parents[1]
+                  / "source/dg5f_isaaclab/dg5f_isaaclab/tasks/direct/dg5f_cube/dg5f_cube_env_cfg.py"
+                  ).read_text()
+        self.assertIn("if self.goal_stream:\n            self.goal_velocity_window_deg = min(", source)

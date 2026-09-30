@@ -124,6 +124,47 @@ def sample_curriculum_goals(current_quats: torch.Tensor, min_error_rad: float, l
     return quat_multiply(current_quats, deltas), at_frontier
 
 
+STREAM_STAGES = ("A", "B", "C")
+
+
+def stage_axes(stage: str, count: int, device, primary_axis, generator=None) -> torch.Tensor:
+    """Rotation axes for one stage of the DIRECTIONAL curriculum, in the palm frame.
+
+    Stage A is the single axis the previous experiment already solved, B the three palm principal
+    axes, C a uniformly sampled direction. The angle is fixed by the caller: this curriculum grows
+    directional complexity only, so a goal never becomes a large single-step orientation jump.
+    """
+    if stage == "A":
+        axis = torch.as_tensor(primary_axis, dtype=torch.float32, device=device)
+        return (axis / axis.norm()).expand(count, 3).clone()
+    if stage == "B":
+        pick = torch.randint(3, (count,), device=device, generator=generator)
+        return torch.eye(3, device=device)[pick]
+    if stage == "C":
+        return random_axes(count, device, generator)
+    raise ValueError(f"Unknown stream stage {stage!r}, expected one of {STREAM_STAGES}")
+
+
+def sample_fixed_angle_goals(current_quats: torch.Tensor, angle_rad: float, stage: str, primary_axis,
+                             generator=None) -> torch.Tensor:
+    """Goals exactly angle_rad from the CURRENT orientation, about a stage-dependent axis.
+
+    Measuring from the current orientation rather than from the previous ideal goal is what keeps
+    every goal exactly angle_rad away: tracking error would otherwise accumulate into a target that
+    is no longer the requested distance from where the object actually is.
+
+    Stages A and B draw a random sign, which makes the stream reversible instead of a monotonic
+    drift in one direction. Stage C needs no sign because the axis itself is already two-sided.
+    """
+    count, device = current_quats.shape[0], current_quats.device
+    axes = stage_axes(stage, count, device, primary_axis, generator)
+    if stage in ("A", "B"):
+        sign = torch.where(torch.rand(count, device=device, generator=generator) < 0.5, -1.0, 1.0)
+        axes = axes * sign[:, None]
+    angles = torch.full((count,), float(angle_rad), device=device)
+    return quat_multiply(current_quats, axis_angle_quat_axes(angles, axes))
+
+
 def axis_angle_quat_axes(angles: torch.Tensor, axes: torch.Tensor) -> torch.Tensor:
     """Per-entry axis-angle to quaternion (axis_angle_quat shares one axis for the whole batch)."""
     half = 0.5 * angles[:, None]

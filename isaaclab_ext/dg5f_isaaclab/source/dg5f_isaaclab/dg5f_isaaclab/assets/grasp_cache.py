@@ -16,6 +16,9 @@ from collections.abc import Sequence
 import numpy as np
 
 DEFAULT_GRASP_CACHE_PATH = Path(__file__).parent / "data/fingertip_grasp_cache.npz"
+# The perturbation-validated subset written by scripts/grasp_cache_robustify.py. Kept as a separate
+# artefact: the full cache stays reproducible, and a run can state which distribution it trained on.
+ROBUST_GRASP_CACHE_PATH = Path(__file__).parent / "data/fingertip_grasp_cache_robust.npz"
 REQUIRED_ARRAYS = ("q", "q_cmd", "cube_pos", "cube_quat", "joint_names")
 # PhysX settles a joint slightly outside its limit under contact. The same scale is already
 # documented elsewhere in this project (cfg disabled_joint_lock_armature: "up to 0.065 deg" in

@@ -22,6 +22,15 @@ parser.add_argument("--task", default="DG5F-Cube-Direct-v0")
 parser.add_argument("--num_envs", type=int, default=128)
 parser.add_argument("--seed", type=int, default=1234)
 parser.add_argument("--baselines", default="zero,random")
+parser.add_argument("--stage", default=None,
+                    help="Goal-stream directional stage to evaluate at (A/B/C). This script does not "
+                         "go through hydra, so the stage cannot be passed as env.goal_stream_stage.")
+parser.add_argument("--goal_angle_deg", type=float, default=None,
+                    help="Goal magnitude to evaluate at, for the bootstrap phase. Sets BOTH "
+                         "goal_stream_angle_deg and min_initial_goal_error_deg: the env asserts the "
+                         "sampled initial error is at least the latter, so changing one alone trips "
+                         "that assert. A checkpoint must be judged at the angle it is being trained "
+                         "at, or the gate measures a different task.")
 parser.add_argument("--output", type=Path, required=True)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -57,6 +66,13 @@ def parse_runs():
 
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
+    if args_cli.stage is not None:
+        env_cfg.goal_stream_stage = args_cli.stage
+    if args_cli.goal_angle_deg is not None:
+        env_cfg.goal_stream_angle_deg = args_cli.goal_angle_deg
+        env_cfg.min_initial_goal_error_deg = args_cli.goal_angle_deg
+    if args_cli.stage is not None or args_cli.goal_angle_deg is not None:
+        env_cfg.resolve_control_config()  # re-validates the stage name and the angle vs tolerance
     env = RslRlVecEnvWrapper(gym.make(args_cli.task, cfg=env_cfg))
     raw = env.unwrapped
     tol_deg = math.degrees(env_cfg.success_tolerance_rad)
@@ -70,8 +86,12 @@ def main():
         for i in ids[raw.episode_length_buf[ids] > 0].tolist():
             if i not in records:
                 steps = int(raw.episode_length_buf[i])
+                completed = int(raw.goals_completed[i])
                 records[i] = {
-                    "held": bool(tracker.succeeded[i]), "entered": bool(tracker.entered[i]),
+                    # NOT tracker.succeeded: that flag is cleared on every new goal, so with a
+                    # goal stream it describes only the goal in progress. goals_completed is the
+                    # episode-level fact, and success_step keeps the FIRST success of the episode.
+                    "held": completed > 0, "entered": bool(tracker.entered[i]),
                     "drop": bool(raw.reset_terminated[i]),
                     "initial": math.degrees(raw.initial_orientation_error[i]),
                     "final": math.degrees(raw.orientation_error[i]),
@@ -79,6 +99,12 @@ def main():
                     "in_tol": int(tracker.steps_in_tolerance[i]) / steps,
                     "held_step": int(tracker.success_step[i]), "steps": steps,
                     "reward": float(raw.episode_returns[i]),
+                    # Stream metrics: with a chain of goals, "did it succeed" no longer describes
+                    # the behaviour. goals_completed is consecutive within an episode by
+                    # construction, because a completed goal never resets the episode.
+                    "goals": completed,
+                    "issued": int(raw.goals_issued[i]),
+                    "tips": float(raw.tip_contact_sum[i]) / steps,
                 }
         reset_idx(env_ids)
 
@@ -88,11 +114,27 @@ def main():
     for name, run_dir, path in parse_runs():
         if path is not None:
             if run_dir not in runners:
-                agent = load_yaml(str(run_dir / "params" / "agent.yaml"))
+                # Each checkpoint is rebuilt from ITS run's agent config. A synthetic run directory
+                # (the actor-only warm start) has no params/, so fall back to the task's registered
+                # config -- correct there precisely because that checkpoint was BUILT for this task.
+                params = run_dir / "params" / "agent.yaml"
+                if params.exists():
+                    agent = load_yaml(str(params))
+                else:
+                    from isaaclab_tasks.utils import load_cfg_from_registry
+                    agent = load_cfg_from_registry(args_cli.task, "rsl_rl_cfg_entry_point").to_dict()
+                    print(f"[EVAL] {run_dir.name} has no params/agent.yaml; using the registered "
+                          f"config for {args_cli.task}", flush=True)
                 runners[run_dir] = OnPolicyRunner(env, agent, log_dir=None, device=raw.device)
             runner = runners[run_dir]
             runner.load(str(path))
             policy = runner.get_inference_policy(device=raw.device)
+            # The learned exploration std. Not used by the deterministic rollout below, but it is
+            # what the training watchdog reads: std growing while these metrics do not improve is
+            # the signature of the failed reward-v3 run (0.20 -> 0.795).
+            std = getattr(runner.alg.policy, "std", None)
+            action_std = float(std.mean()) if std is not None else float(
+                runner.alg.policy.log_std.exp().mean())
         torch.manual_seed(args_cli.seed)
         with torch.inference_mode():
             env.reset()
@@ -135,6 +177,19 @@ def main():
             "action_near_limit_fraction": near / steps,
             "torque_saturation_fraction": sat / steps,
             "max_abs_joint_velocity": vel,
+            # --- stream metrics. first_goal_held_success_rate is the stage gate; it is the same
+            # quantity as held_success_rate but named for what it means in a chain of goals.
+            "first_goal_held_success_rate": mean("held"),
+            "goals_completed_per_episode": mean("goals"),
+            "max_consecutive_goals": max(v["goals"] for v in values),
+            "target_completion_rate": sum(v["goals"] for v in values) / max(1, sum(v["issued"] for v in values)),
+            "mean_time_per_completed_goal_s": (
+                sum(v["steps"] * raw.step_dt / v["goals"] for v in values if v["goals"])
+                / max(1, sum(1 for v in values if v["goals"]))),
+            "commanded_rotation_deg_per_episode": mean("goals") * getattr(env_cfg, "goal_stream_angle_deg", 0.0),
+            "mean_tip_contacts": mean("tips"),
+            "action_std": action_std if path is not None else None,
+            "stage": getattr(env_cfg, "goal_stream_stage", None) if getattr(env_cfg, "goal_stream", False) else None,
         }
         r = results[name]
         print(f"[EVAL] {name:>18} n={n} held={r['held_success_rate']:.3f} entered={r['entered_tolerance_rate']:.3f}"
@@ -143,6 +198,11 @@ def main():
               f" mean={r['mean_error_deg']:.1f} min={r['min_error_deg']:.1f} reward={r['episode_reward']:.2f}"
               f" near_pm1={r['action_near_limit_fraction']:.3f} sat={r['torque_saturation_fraction']:.3f}"
               f" maxvel={r['max_abs_joint_velocity']:.2f}", flush=True)
+        print(f"[EVAL] {'':>18}   stream: goals/ep={r['goals_completed_per_episode']:.2f}"
+              f" max_consecutive={r['max_consecutive_goals']}"
+              f" completion={r['target_completion_rate']:.3f}"
+              f" s/goal={r['mean_time_per_completed_goal_s']:.2f}"
+              f" tips={r['mean_tip_contacts']:.2f}", flush=True)
     args_cli.output.parent.mkdir(parents=True, exist_ok=True)
     args_cli.output.write_text(json.dumps(results, indent=2))
     print(f"[EVAL] wrote {args_cli.output}")

@@ -9,6 +9,7 @@ import logging
 import math
 
 import gymnasium as gym
+import numpy as np
 import torch
 
 import isaaclab.sim as sim_utils
@@ -28,9 +29,15 @@ from dg5f_isaaclab.assets.dg5f import (
 )
 from .dg5f_cube_env_cfg import DG5FCubeEnvCfg
 from .control import ActionDelayQueue, position_targets
-from .goals import sample_curriculum_goals, sample_goal_quats
+from .goals import (
+    axis_angle_quat_axes, random_axes, sample_curriculum_goals, sample_fixed_angle_goals,
+    sample_goal_quats,
+)
 from .grasp import GraspQualityReward
-from .success import HeldSuccessTracker, hold_steps, orientation_state_reward
+from .success import (
+    HeldSuccessTracker, hold_steps, orientation_baseline_reward, orientation_reward_table,
+    orientation_state_reward,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +49,9 @@ EPISODE_LOG_KEYS = (
     "episode_mean_orientation_error_deg", "episode_min_orientation_error_deg",
     "episode_time_in_tolerance_fraction", "episode_time_to_held_success_s", "episode_length_s",
     "episode_goals_completed", "episode_mean_tip_contacts",
+    # Stream metrics: with a chain of goals, "success" alone no longer describes the behaviour.
+    "episode_goals_issued", "episode_target_completion_rate", "episode_time_per_completed_goal_s",
+    "episode_first_goal_held_success_rate", "episode_commanded_rotation_deg",
 )
 
 
@@ -62,6 +72,7 @@ class DG5FCubeEnv(DirectRLEnv):
         if sum(value * value for value in cfg.target_axis_in_palm) <= 0:
             raise ValueError("Target rotation axis must be nonzero")
         needs_contacts = (cfg.tip_contact_reward or cfg.palm_contact_penalty or cfg.grasp_quality_scale
+                          or cfg.grasp_deficit_scale or cfg.grasp_quality_deficit_scale
                           or cfg.max_time_without_tip_contact_s is not None)
         if needs_contacts and not cfg.enable_contact_sensors:
             raise ValueError("Contact-based reward/termination terms require enable_contact_sensors")
@@ -137,8 +148,10 @@ class DG5FCubeEnv(DirectRLEnv):
         assert required == cfg.success_hold_steps, (required, cfg.success_hold_steps)
         self.success = HeldSuccessTracker(self.num_envs, required, self.device)
         self.success_eligible = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        # Goals completed within the current episode (the consecutive-successes metric).
+        # Goals completed within the current episode (the consecutive-successes metric), and goals
+        # HANDED OUT, whose ratio is the completion rate of the stream.
         self.goals_completed = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.goals_issued = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         # Always defined so the log schema does not depend on the contact sensors being on.
         self.tip_contact_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.tip_in_contact = torch.zeros((self.num_envs, len(self.tip_ids)), dtype=torch.bool, device=self.device)
@@ -159,15 +172,27 @@ class DG5FCubeEnv(DirectRLEnv):
             if not 0 < cfg.goal_frontier_fraction + cfg.goal_inside_fraction <= 1:
                 raise ValueError("goal frontier/inside fractions must sum into (0, 1]")
         self.grasp_cache = None
+        # Entries [0, primary_grasp_count) come from grasp_cache_path, the rest from the optional
+        # mix cache: one tensor set, so _pick_grasps only has to choose which range to draw from.
+        self.primary_grasp_count = 0
         if cfg.grasp_cache_path is not None:
-            cache = load_grasp_cache(cfg.grasp_cache_path, cfg.actuated_joint_names, DG5F_JOINT_LIMITS)
+            caches = [load_grasp_cache(cfg.grasp_cache_path, cfg.actuated_joint_names, DG5F_JOINT_LIMITS)]
+            self.primary_grasp_count = len(caches[0])
+            if cfg.mix_grasp_cache_path is not None and cfg.mix_cache_fraction > 0:
+                caches.append(load_grasp_cache(
+                    cfg.mix_grasp_cache_path, cfg.actuated_joint_names, DG5F_JOINT_LIMITS))
             self.grasp_cache = {
-                "joint_pos": torch.as_tensor(cache.joint_pos, device=self.device),
-                "joint_command": torch.as_tensor(cache.joint_command, device=self.device),
-                "cube_pos": torch.as_tensor(cache.cube_pos, device=self.device),
-                "cube_quat": torch.as_tensor(cache.cube_quat, device=self.device),
+                key: torch.as_tensor(np.concatenate([getattr(c, attribute) for c in caches]),
+                                     device=self.device)
+                for key, attribute in (("joint_pos", "joint_pos"), ("joint_command", "joint_command"),
+                                       ("cube_pos", "cube_pos"), ("cube_quat", "cube_quat"))
             }
-            print(f"[DG5F] grasp_cache n={len(cache)} sha256={cache.sha256[:16]} source={cache.source}")
+            for cache in caches:
+                print(f"[DG5F] grasp_cache n={len(cache)} sha256={cache.sha256[:16]} source={cache.source}")
+            if len(caches) > 1:
+                print(f"[DG5F] reset draw: {1 - cfg.mix_cache_fraction:.0%} primary"
+                      f" ({self.primary_grasp_count}) / {cfg.mix_cache_fraction:.0%} mix"
+                      f" ({len(caches[1])})")
         self.error_sum = torch.zeros(self.num_envs, device=self.device)
         self.error_min = torch.full((self.num_envs,), math.inf, device=self.device)
         self.initial_orientation_error = torch.zeros(self.num_envs, device=self.device)
@@ -176,6 +201,7 @@ class DG5FCubeEnv(DirectRLEnv):
         self.velocity_watch = [names.index(n) for n in cfg.velocity_watch_joints]
         self.saturation_watch = [names.index(n) for n in cfg.saturation_watch_joints]
         self.raw_action_clip_fraction = torch.zeros((), device=self.device)
+        self.reward_terms: dict[str, torch.Tensor] = {}
         self._compute_state()
         print(f"[DG5F] joints={names}")
         print(f"[DG5F] active_action_joints={active_names}")
@@ -190,6 +216,23 @@ class DG5FCubeEnv(DirectRLEnv):
               f" progress_scale={cfg.orientation_progress_scale} success_tol_deg="
               f"{math.degrees(cfg.success_tolerance_rad):g} hold={cfg.success_hold_time_s}s={required} steps"
               f" (control_dt={self.step_dt:.5f}s) bonus={cfg.success_bonus}")
+        if cfg.goal_stream:
+            print(f"[DG5F] goal_stream angle={cfg.goal_stream_angle_deg} deg stage={cfg.goal_stream_stage}"
+                  f" dwell={cfg.goal_dwell_reward}/step x {cfg.success_hold_steps} steps"
+                  f" = {cfg.goal_dwell_reward * cfg.success_hold_steps:.2f} vs bonus {cfg.success_bonus}"
+                  f"; progress scale={cfg.orientation_progress_scale} clip={cfg.orientation_progress_clip_rad} rad"
+                  f" ({math.degrees(cfg.orientation_progress_clip_rad):.2f} deg/step)")
+            print(f"[DG5F] rails: pose {cfg.pose_penalty_scale} beyond {cfg.pose_penalty_deadband_deg} deg,"
+                  f" anchor {cfg.palm_region_distance_scale} beyond {1000 * cfg.palm_region_deadband_m:.0f} mm,"
+                  f" near-goal omega {cfg.goal_velocity_scale} above {cfg.goal_velocity_threshold_rad_s} rad/s"
+                  f" inside {cfg.goal_velocity_error_deg} deg")
+        if cfg.orientation_baseline:
+            table = orientation_reward_table(
+                cfg.orientation_state_scale, math.radians(cfg.orientation_decay_deg),
+                math.radians(cfg.goal_stream_angle_deg))
+            # Printed, not assumed: the sign change at the stream angle is the whole point of the term.
+            print("[DG5F] orientation_state_reward(err): "
+                  + "  ".join(f"{deg:g}deg={value:+.4f}" for deg, value in table))
         print(f"[DG5F] cube_size_m={cfg.cube_size_m} cube_mass_kg={cfg.object_cfg.spawn.mass_props.mass}")
         print(f"[DG5F] SysID={sysid.source} sha256={sysid.sha256}; applied stiffness/damping/armature/friction")
         print(f"[DG5F] SysID fit_info_by_finger={sysid.fit_info_by_finger}")
@@ -356,12 +399,32 @@ class DG5FCubeEnv(DirectRLEnv):
         computed = self.hand.data.computed_torque[:, self.joint_ids].detach()
         applied = self.hand.data.applied_torque[:, self.joint_ids].detach()
         joint_velocity = self.hand.data.joint_vel[:, self.joint_ids].detach()
+        if self.cfg.orientation_baseline:
+            state_term = orientation_baseline_reward(
+                self.orientation_error, self.cfg.orientation_state_scale,
+                math.radians(self.cfg.orientation_decay_deg), math.radians(self.cfg.goal_stream_angle_deg))
+        else:
+            state_term = orientation_state_reward(
+                self.orientation_error, self.cfg.orientation_state_scale,
+                math.radians(self.cfg.orientation_sigma_deg))
+        raw_progress = self.previous_orientation_error - self.orientation_error
+        if self.cfg.orientation_progress_clip_rad:
+            # A contact impulse or an overshoot must not pay a large one-step reward; the direction
+            # of motion is the information wanted here, not its magnitude.
+            progress = raw_progress.clamp(-self.cfg.orientation_progress_clip_rad,
+                                          self.cfg.orientation_progress_clip_rad)
+        else:
+            progress = raw_progress
+        # Dead zone: the first pose_penalty_deadband_deg of finger rearrangement is free, so the
+        # term is a rail against integrated-delta drift rather than a pull back to the exact
+        # cached grasp. Rotating the cube REQUIRES leaving that pose.
+        pose_deviation = (self.joint_command - self.grasp_command[:, self.active_indices]).abs().mean(dim=-1)
+        pose_excess = (pose_deviation - math.radians(self.cfg.pose_penalty_deadband_deg)).clamp_min(0.0)
+        anchor_excess = (self.palm_region_distance - self.cfg.palm_region_deadband_m).clamp_min(0.0)
         terms = {
-            "orientation_state_reward": orientation_state_reward(
-                self.orientation_error, self.cfg.orientation_state_scale, math.radians(self.cfg.orientation_sigma_deg)),
-            "orientation_progress_reward": self.cfg.orientation_progress_scale * (
-                self.previous_orientation_error - self.orientation_error),
-            "palm_distance_penalty": -self.cfg.palm_region_distance_scale * self.palm_region_distance,
+            "orientation_state_reward": state_term,
+            "orientation_progress_reward": self.cfg.orientation_progress_scale * progress,
+            "palm_distance_penalty": -self.cfg.palm_region_distance_scale * anchor_excess,
             "action_penalty": -self.cfg.action_penalty_scale * self.actions.square().mean(dim=-1),
             "action_rate_penalty": -self.cfg.action_rate_penalty_scale * self.action_delta.square().mean(dim=-1),
             "success_bonus": self.cfg.success_bonus * first_success.float(),
@@ -379,10 +442,40 @@ class DG5FCubeEnv(DirectRLEnv):
             quality, lambda_min = self.grasp_quality(
                 self.tip_pos_palm - self.cube_pos[:, None, :], self.tip_in_contact)
             self.grasp_lambda_min = lambda_min
+            # Kept on the env so reward_preflight.py can report the value an intact grasp holds:
+            # that measurement is what grasp_quality_floor has to be set from, and the deficit
+            # penalty below reads it rather than recomputing the Gramian.
+            self.grasp_quality_value = quality
             terms["grasp_quality_reward"] = self.cfg.grasp_quality_scale * quality
+        if self.cfg.grasp_deficit_scale:
+            # Graded on the COUNT, not the >=3 indicator: 3+ tips is free, 2 tips costs one unit,
+            # 1 tip two. The indicator would make the whole flicker band cost the same as a
+            # collapsing grasp, and it is the slide from 3 to 1 that predicts the drop.
+            deficit = (self.cfg.min_tip_contacts - self.tip_contact_count).clamp_min(0).float()
+            terms["grasp_deficit_penalty"] = -self.cfg.grasp_deficit_scale * deficit
+        if self.cfg.grasp_quality_deficit_scale:
+            # Only below the floor, so the quality an intact grasp holds is never taxed.
+            shortfall = (self.cfg.grasp_quality_floor - self.grasp_quality_value).clamp_min(0.0)
+            terms["grasp_quality_deficit_penalty"] = (
+                -self.cfg.grasp_quality_deficit_scale * shortfall)
+        if self.cfg.goal_dwell_reward:
+            # The reward-v3 policy learned to pass THROUGH the tolerance (entered 0.508, held
+            # 0.000). Paying per step while inside it is what makes braking and staying worth more
+            # than flying past, and the total is capped below success_bonus by resolve_control_config.
+            terms["goal_dwell_reward"] = self.cfg.goal_dwell_reward * in_tolerance.float()
+        if self.cfg.goal_velocity_scale:
+            # Anti-overshoot only: near the goal, and only the part of the object's angular speed
+            # above a threshold. A global motion penalty is what broke the previous reward.
+            # The window is capped at half the goal magnitude, because an ABSOLUTE window stops
+            # meaning "near the goal" once the goal is small: measured at a 10 deg goal with the
+            # 10 deg window, this term went to -0.0025 per step against -0.0001..-0.0006 at 20 deg,
+            # i.e. it was braking the entire approach instead of the arrival.
+            near = self.orientation_error < math.radians(self.cfg.goal_velocity_window_deg)
+            speed = torch.linalg.vector_norm(self.cube.data.root_ang_vel_w, dim=-1)
+            excess = (speed - self.cfg.goal_velocity_threshold_rad_s).clamp_min(0.0)
+            terms["goal_velocity_penalty"] = -self.cfg.goal_velocity_scale * excess * near.float()
         if self.cfg.pose_penalty_scale:
-            deviation = (self.joint_command - self.grasp_command[:, self.active_indices]).abs()
-            terms["pose_penalty"] = -self.cfg.pose_penalty_scale * deviation.mean(dim=-1)
+            terms["pose_penalty"] = -self.cfg.pose_penalty_scale * pose_excess
         if self.cfg.torque_penalty_scale:
             # Mean, not sum, so the weight does not depend on the DOF count.
             terms["torque_penalty"] = -self.cfg.torque_penalty_scale * applied.square().mean(dim=-1)
@@ -390,6 +483,9 @@ class DG5FCubeEnv(DirectRLEnv):
             terms["work_penalty"] = -self.cfg.work_penalty_scale * (
                 applied * joint_velocity).sum(dim=-1).square()
         reward = sum(terms.values())
+        # Per-env terms for diagnostics (the log below only keeps their means, which cannot be
+        # restricted to the envs that are still holding the cube). No host sync, no extra compute.
+        self.reward_terms = terms
         self.previous_orientation_error.copy_(self.orientation_error)
         self.episode_returns += reward
         # Counted before _resample_goals overwrites goal_at_frontier for these envs.
@@ -419,6 +515,18 @@ class DG5FCubeEnv(DirectRLEnv):
             "goals_completed": self.goals_completed.float().mean(),
             **{name: mask.float().mean() for name, mask in self.termination_reasons.items()},
             "cube_drift_from_grasp_mm": 1000 * self.palm_region_distance.mean(),
+            # Both forms of the progress term: if the clip is binding often, the object is being
+            # moved faster than the term can see and the clip is the wrong size.
+            "orientation_progress_raw_rad": raw_progress.mean(),
+            "orientation_progress_abs_raw_rad": raw_progress.abs().mean(),
+            "orientation_progress_clipped_fraction": (
+                (raw_progress.abs() > self.cfg.orientation_progress_clip_rad).float().mean()
+                if self.cfg.orientation_progress_clip_rad else torch.zeros((), device=self.device)),
+            "pose_deviation_deg": torch.rad2deg(pose_deviation).mean(),
+            "pose_excess_deg": torch.rad2deg(pose_excess).mean(),
+            "anchor_excess_mm": 1000 * anchor_excess.mean(),
+            "cube_ang_speed_rad_s": torch.linalg.vector_norm(self.cube.data.root_ang_vel_w, dim=-1).mean(),
+            "goals_issued": self.goals_issued.float().mean(),
             "goal_angle_limit_deg": torch.tensor(
                 math.degrees(self.goal_angle_limit_rad), device=self.device),
             "tip_contacts": self.tip_contact_count.float().mean(),
@@ -462,6 +570,14 @@ class DG5FCubeEnv(DirectRLEnv):
 
     def _sample_goals_for(self, env_ids: torch.Tensor, reference_quat: torch.Tensor) -> torch.Tensor:
         """Goals for env_ids, measured from reference_quat, honouring the curriculum if enabled."""
+        if self.cfg.goal_stream:
+            # Fixed magnitude, stage-dependent direction. reference_quat is the cube's ACTUAL
+            # orientation (at reset, or at the moment the previous goal was completed), so the new
+            # goal is exactly goal_stream_angle_deg away from where the cube really is.
+            self.goals_issued[env_ids] += 1
+            return sample_fixed_angle_goals(
+                reference_quat, math.radians(self.cfg.goal_stream_angle_deg),
+                self.cfg.goal_stream_stage, self.cfg.target_axis_in_palm)
         if not self.cfg.goal_curriculum:
             return sample_goal_quats(
                 reference_quat, self.cfg.target_orientation_mode, self.cfg.target_axis_in_palm,
@@ -512,6 +628,25 @@ class DG5FCubeEnv(DirectRLEnv):
         self.success_eligible[env_ids] = new_error >= self.cfg.success_tolerance_rad
         self.success.new_goal(env_ids)
 
+    def _pick_grasps(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """Which cache entries these envs reset to, as indices into self.grasp_cache.
+
+        A seam, not a policy: the robustness search prescribes an exact entry per env and the
+        reset curriculum restricts the draw to a subset, without either of them re-implementing
+        reset. env_ids is passed because a mid-episode reset covers only some envs.
+        """
+        total = self.grasp_cache["joint_pos"].shape[0]
+        count = len(env_ids)
+        if total == self.primary_grasp_count or self.cfg.mix_cache_fraction <= 0:
+            return torch.randint(self.primary_grasp_count, (count,), device=self.device)
+        # Two ranges rather than one weighted draw over all entries: the fraction then means what
+        # it says regardless of how differently sized the two caches are.
+        from_mix = torch.rand(count, device=self.device) < self.cfg.mix_cache_fraction
+        picks = torch.randint(self.primary_grasp_count, (count,), device=self.device)
+        mix = self.primary_grasp_count + torch.randint(
+            total - self.primary_grasp_count, (count,), device=self.device)
+        return torch.where(from_mix, mix, picks)
+
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.hand._ALL_INDICES
@@ -538,6 +673,19 @@ class DG5FCubeEnv(DirectRLEnv):
             "episode_time_in_tolerance_fraction": self.success.steps_in_tolerance[completed].float() / steps,
             "episode_time_to_held_success_s": self.success.success_step[completed][success].float() * self.step_dt,
             "episode_length_s": steps * self.step_dt,
+            # Stream metrics. completion rate = completed / issued, so loitering on one goal reads
+            # differently from completing several; time per goal is only defined once one completed.
+            "episode_goals_issued": self.goals_issued[completed].float(),
+            "episode_target_completion_rate":
+                self.goals_completed[completed].float() / self.goals_issued[completed].clamp_min(1).float(),
+            "episode_time_per_completed_goal_s":
+                (steps[self.goals_completed[completed] > 0] * self.step_dt
+                 / self.goals_completed[completed][self.goals_completed[completed] > 0].float()),
+            "episode_first_goal_held_success_rate": (self.goals_completed[completed] >= 1).float(),
+            # Cumulative COMMANDED rotation, not net object orientation: the axes change, so this
+            # is path length along the stream, and it is the honest way to say "how much it turned".
+            "episode_commanded_rotation_deg":
+                self.goals_completed[completed].float() * self.cfg.goal_stream_angle_deg,
         }
         assert set(episode_log) == set(EPISODE_LOG_KEYS)
         self.extras.setdefault("log", {}).update(episode_log)
@@ -546,7 +694,7 @@ class DG5FCubeEnv(DirectRLEnv):
         if self.grasp_cache is not None:
             # Draw a validated fingertip grasp per episode. Diverse initialisation is the single
             # ingredient POISE (2026) credits with post-drop recovery 33.8% -> 72.9%.
-            picks = torch.randint(self.grasp_cache["joint_pos"].shape[0], (count,), device=self.device)
+            picks = self._pick_grasps(env_ids)
             self.hand.data.default_joint_pos[env_ids[:, None], self.joint_ids] = \
                 self.grasp_cache["joint_pos"][picks]
             self.grasp_command[env_ids] = self.grasp_cache["joint_command"][picks]
@@ -574,15 +722,22 @@ class DG5FCubeEnv(DirectRLEnv):
         cube_state = self.cube.data.default_root_state[env_ids].clone()
         noise = self.cfg.cube_reset_position_noise_m
         local_pos = self.cube_anchor[env_ids] + sample_uniform(-noise, noise, (count, 3), device=self.device)
+        # The cube restarts aligned with the palm (identity in the palm frame) unless a perturbation
+        # is configured. The grasp-cache robustness search needs one; 0 deg leaves the historical
+        # aligned reset unchanged, and the goal is sampled against the ACTUAL start pose either way,
+        # so the minimum-initial-error guarantee holds regardless.
+        initial_quat = torch.zeros((count, 4), device=self.device)
+        initial_quat[:, 0] = 1
+        if self.cfg.cube_reset_orientation_noise_deg:
+            angles = sample_uniform(0.0, math.radians(self.cfg.cube_reset_orientation_noise_deg),
+                                    (count,), device=self.device)
+            initial_quat = axis_angle_quat_axes(angles, random_axes(count, self.device))
         cube_state[:, :3] = self.palm_pos_w[env_ids] + quat_apply(self.palm_quat_w[env_ids], local_pos)
-        cube_state[:, 3:7] = self.palm_quat_w[env_ids]
+        cube_state[:, 3:7] = quat_mul(self.palm_quat_w[env_ids], initial_quat)
         cube_state[:, 7:] = 0
         self.cube.write_root_pose_to_sim(cube_state[:, :7], env_ids=env_ids)
         self.cube.write_root_velocity_to_sim(cube_state[:, 7:], env_ids=env_ids)
 
-        # The cube restarts aligned with the palm: identity in the palm frame.
-        initial_quat = torch.zeros((count, 4), device=self.device)
-        initial_quat[:, 0] = 1
         self.goal_quat[env_ids] = self._sample_goals_for(env_ids, initial_quat)
         initial_error = quat_error_magnitude(initial_quat, self.goal_quat[env_ids])
         assert torch.all(initial_error >= math.radians(self.cfg.min_initial_goal_error_deg) - 1e-4)
@@ -592,6 +747,8 @@ class DG5FCubeEnv(DirectRLEnv):
         self.success_eligible[env_ids] = initial_error >= self.cfg.success_tolerance_rad
         self.success.reset(env_ids)
         self.goals_completed[env_ids] = 0
+        # _sample_goals_for above already counted this episode's first goal, so clear before it.
+        self.goals_issued[env_ids] = 1 if self.cfg.goal_stream else 0
         self.error_sum[env_ids] = 0
         self.tip_contact_sum[env_ids] = 0
         self.steps_without_tip_contact[env_ids] = 0

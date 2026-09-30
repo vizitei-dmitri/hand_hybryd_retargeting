@@ -27,6 +27,11 @@ parser.add_argument(
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--freeze_actor_iterations", type=int, default=0,
+                    help="Train only the critic for this many iterations first. Needed after an "
+                         "actor-only warm start: the fresh critic would otherwise move a competent "
+                         "actor along advantages from a value function that has never seen this "
+                         "reward. Counts towards --max_iterations.")
 parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
@@ -214,7 +219,41 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
     # run training
-    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    remaining = agent_cfg.max_iterations
+    if args_cli.freeze_actor_iterations:
+        # Critic warm-up. Warm-starting the actor alone leaves the critic estimating the value of a
+        # reward it has never seen, and PPO then moves a competent actor along advantages from a
+        # systematically wrong value function. Measured on this task: the warm-start actor has a
+        # deterministic drop_rate of 0.078 over full episodes, and 50 ordinary PPO iterations take
+        # it to 0.977 while Loss/value_function is still 17 and falling (logs/stream/*_eval.json).
+        # Freezing the actor's parameters simply leaves their .grad at None, so Adam skips them and
+        # clip_grad_norm_ ignores them; only the critic moves.
+        policy = runner.alg.policy
+        frozen = [p for name, p in policy.named_parameters()
+                  if name.startswith("actor.") or name in ("std", "log_std")]
+        for parameter in frozen:
+            parameter.requires_grad_(False)
+        # The adaptive schedule keys off the policy KL, which is ~0 while the actor is frozen, so it
+        # would drive the learning rate to its ceiling and hand that rate to the actor on unfreeze.
+        schedule, learning_rate = runner.alg.schedule, agent_cfg.algorithm.learning_rate
+        runner.alg.schedule = "fixed"
+        runner.alg.learning_rate = learning_rate
+        for group in runner.alg.optimizer.param_groups:
+            group["lr"] = learning_rate
+        warmup = min(args_cli.freeze_actor_iterations, remaining)
+        print(f"[INFO]: Critic warm-up: {warmup} iterations with {len(frozen)} actor tensors frozen,"
+              f" schedule fixed at lr {learning_rate}")
+        runner.learn(num_learning_iterations=warmup, init_at_random_ep_len=True)
+        for parameter in frozen:
+            parameter.requires_grad_(True)
+        runner.alg.schedule = schedule
+        runner.alg.learning_rate = learning_rate
+        for group in runner.alg.optimizer.param_groups:
+            group["lr"] = learning_rate
+        remaining -= warmup
+        print(f"[INFO]: Critic warm-up done; actor unfrozen, {remaining} iterations to go")
+    if remaining > 0:
+        runner.learn(num_learning_iterations=remaining, init_at_random_ep_len=True)
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
 
