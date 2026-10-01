@@ -23,17 +23,43 @@ mis-scaled inputs for its first thousands of steps. The actor normalizer must be
 reason, only more so: without it the transferred actor weights see a different input scale and the
 warm start is worthless.
 
+For continuation under the SAME reward, --reset_std_only instead changes ONLY
+std/log_std. It preserves the critic, optimizer moments, LR, iteration and every
+other checkpoint field. Set the continuation entropy coefficient in train.py.
+
 No Isaac Sim needed: the architecture is unchanged, so this is pure tensor surgery.
 """
 
 import argparse
+import copy
 import json
+import math
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 
 KEEP_PREFIXES = ("actor.", "actor_obs_normalizer.", "critic_obs_normalizer.")
+
+
+def reset_std_only(checkpoint, std):
+    """Copy a trained checkpoint, changing only its exploration parameter.
+
+    Preserve the critic, normalizers, Adam (including std moments), LR, iteration,
+    and metadata. This is continuation under the SAME reward, not a warm start
+    across a reward change. Entropy is configured separately by the training CLI.
+    """
+    if not math.isfinite(std) or std <= 0:
+        raise ValueError("Action std must be finite and positive")
+    model = checkpoint["model_state_dict"]
+    keys = [key for key in ("std", "log_std") if key in model]
+    if len(keys) != 1:
+        raise ValueError("Expected exactly one of std or log_std")
+    result = copy.deepcopy(checkpoint)
+    key = keys[0]
+    result["model_state_dict"][key] = torch.full_like(
+        model[key], std if key == "std" else math.log(std))
+    return result
 
 
 def main():
@@ -46,7 +72,25 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1.0e-3,
                         help="Must match the new agent config; the adaptive schedule restarts from it")
     parser.add_argument("--seed", type=int, default=42, help="Seeds the critic re-initialization")
+    parser.add_argument("--reset_std_only", action="store_true",
+                        help="Change only std; preserve critic, Adam, LR, iteration and all other state. "
+                             "--learning_rate and --seed do not apply in this mode.")
     args = parser.parse_args()
+
+    if args.source.resolve() == args.out.resolve() or args.out.exists():
+        parser.error("Output must be a new file; source and existing checkpoints are never overwritten")
+    if not math.isfinite(args.init_noise_std) or args.init_noise_std <= 0:
+        parser.error("--init_noise_std must be finite and positive")
+
+    if args.reset_std_only:
+        checkpoint = torch.load(args.source, weights_only=False, map_location="cpu")
+        result = reset_std_only(checkpoint, args.init_noise_std)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(result, args.out)
+        print(f"[STD_ONLY] source={args.source.resolve()} std={args.init_noise_std}; "
+              f"critic/normalizers/Adam/LR/iter={result.get('iter')} preserved")
+        print(f"[STD_ONLY] wrote {args.out}")
+        return
 
     torch.manual_seed(args.seed)
     checkpoint = torch.load(args.source, weights_only=False, map_location="cpu")

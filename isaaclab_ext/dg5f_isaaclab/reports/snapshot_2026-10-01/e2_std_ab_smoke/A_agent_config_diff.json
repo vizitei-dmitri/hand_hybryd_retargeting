@@ -1,0 +1,32 @@
+[
+  {
+    "key": "/algorithm/learning_rate",
+    "source": "0.00011390625000000006",
+    "current": "0.0002562890625000001"
+  },
+  {
+    "key": "/algorithm/entropy_coef",
+    "source": "0.005",
+    "current": "0.001"
+  },
+  {
+    "key": "/max_iterations",
+    "source": "3000",
+    "current": "100"
+  },
+  {
+    "key": "/load_run",
+    "source": "2026-09-30_19-50-14_overnight_E2_exploration",
+    "current": "2026-10-01_e2_std05_preserved"
+  },
+  {
+    "key": "/run_name",
+    "source": "e2_continue_3600",
+    "current": "e2_std_ab_A_100"
+  },
+  {
+    "key": "/load_checkpoint",
+    "source": "model_599.pt",
+    "current": "model_3599.pt"
+  }
+]

@@ -71,3 +71,6 @@ _build
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
+
+# Generated fixed-axis importer input for the isolated repose benchmark
+/assets/repose_cache/

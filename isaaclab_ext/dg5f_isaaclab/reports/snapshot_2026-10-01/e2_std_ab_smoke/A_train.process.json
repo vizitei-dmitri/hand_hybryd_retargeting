@@ -1,0 +1,476 @@
+{
+  "command": [
+    "/home/yoba/Documents/work/IsaacLab/env_isaaclab/bin/python",
+    "scripts/rsl_rl/train.py",
+    "--task",
+    "DG5F-Cube-Stream-Direct-v0",
+    "--headless",
+    "--num_envs",
+    "1024",
+    "--seed",
+    "42",
+    "--max_iterations",
+    "100",
+    "--resume",
+    "--load_run",
+    "2026-10-01_e2_std05_preserved",
+    "--checkpoint",
+    "model_3599.pt",
+    "--restore_continuation_state",
+    "--verify_resume_state",
+    "env.goal_stream_stage=A",
+    "agent.run_name=e2_std_ab_A_100",
+    "agent.algorithm.entropy_coef=0.001"
+  ],
+  "expected_checkpoint": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-10-01_e2_std05_preserved/model_3599.pt",
+  "resume_verified": true,
+  "returncode": 0,
+  "owned_process_groups": [
+    1550546
+  ],
+  "seconds": 450.3845339230029,
+  "peak_compute_MiB": 4362,
+  "peak_total_MiB": 5505,
+  "gpu_samples": [
+    {
+      "seconds": 5.1,
+      "pid": 1550546,
+      "MiB": 174
+    },
+    {
+      "seconds": 10.2,
+      "pid": 1550546,
+      "MiB": 288
+    },
+    {
+      "seconds": 15.3,
+      "pid": 1550546,
+      "MiB": 3568
+    },
+    {
+      "seconds": 20.4,
+      "pid": 1550546,
+      "MiB": 4266
+    },
+    {
+      "seconds": 25.4,
+      "pid": 1550546,
+      "MiB": 4360
+    },
+    {
+      "seconds": 30.5,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 35.5,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 40.6,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 45.6,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 50.7,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 55.8,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 60.8,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 65.9,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 70.9,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 76.0,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 81.0,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 86.1,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 91.1,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 96.2,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 101.3,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 106.3,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 111.4,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 116.4,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 121.5,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 126.5,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 131.6,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 136.7,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 141.7,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 146.8,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 151.8,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 156.9,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 161.9,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 167.0,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 172.1,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 177.1,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 182.2,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 187.2,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 192.3,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 197.4,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 202.4,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 207.5,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 212.5,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 217.6,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 222.6,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 227.7,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 232.8,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 237.8,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 242.9,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 247.9,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 253.0,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 258.1,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 263.1,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 268.2,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 273.2,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 278.3,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 283.3,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 288.4,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 293.5,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 298.5,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 303.6,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 308.6,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 313.7,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 318.8,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 323.8,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 328.9,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 333.9,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 339.0,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 344.1,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 349.1,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 354.2,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 359.2,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 364.3,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 369.4,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 374.4,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 379.5,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 384.6,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 389.6,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 394.7,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 399.7,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 404.8,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 409.9,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 414.9,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 420.0,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 425.0,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 430.1,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 435.2,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 440.2,
+      "pid": 1550546,
+      "MiB": 4362
+    },
+    {
+      "seconds": 445.3,
+      "pid": 1550546,
+      "MiB": 4362
+    }
+  ]
+}

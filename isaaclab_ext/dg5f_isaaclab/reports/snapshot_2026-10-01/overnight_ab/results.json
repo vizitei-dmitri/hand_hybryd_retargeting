@@ -1,0 +1,297 @@
+{
+  "created": "2026-09-30T19:50:03.239281",
+  "iterations": 600,
+  "num_envs": 1024,
+  "eval_num_envs": 128,
+  "eval_seed": 1234,
+  "plan": [
+    {
+      "name": "E2_exploration",
+      "std1": true,
+      "overrides": [
+        "agent.algorithm.entropy_coef=0.005"
+      ]
+    },
+    {
+      "name": "E1_horizon",
+      "overrides": [
+        "agent.algorithm.gamma=0.998"
+      ]
+    },
+    {
+      "name": "E5_goal10",
+      "bootstrap": true,
+      "overrides": []
+    },
+    {
+      "name": "E4_reward_shape",
+      "overrides": [
+        "env.orientation_baseline=false"
+      ]
+    },
+    {
+      "name": "E3_batch",
+      "overrides": [
+        "agent.num_steps_per_env=64"
+      ]
+    },
+    {
+      "name": "E6_combination",
+      "std1": true,
+      "overrides": [
+        "agent.algorithm.gamma=0.998",
+        "agent.algorithm.entropy_coef=0.005"
+      ]
+    }
+  ],
+  "warm_sha256": "4fac92d0a4a93b65c285119168d89baae8c26d7fd526bbaa33b37361f4d875d5",
+  "gate": {
+    "held": 0.7,
+    "drop": 0.15,
+    "goals_per_episode": 1.5
+  },
+  "experiments": {
+    "E2_exploration": {
+      "status": "completed",
+      "spec": {
+        "name": "E2_exploration",
+        "std1": true,
+        "overrides": [
+          "agent.algorithm.entropy_coef=0.005"
+        ]
+      },
+      "warm_start": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-09-29_00-00-01_warm_start_std1/model_0.pt",
+      "checkpoint": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-09-30_19-50-14_overnight_E2_exploration/model_599.pt",
+      "metrics": {
+        "episodes": 128,
+        "held_success_rate": 0.4609375,
+        "entered_tolerance_rate": 0.796875,
+        "drop_rate": 0.640625,
+        "initial_error_deg": 19.99999600309125,
+        "final_error_deg": 67.91852008390752,
+        "final_error_deg_not_dropped": 22.84924322758251,
+        "final_within_tolerance": 0.0078125,
+        "mean_error_deg": 19.949946224472935,
+        "min_error_deg": 4.021409537977139,
+        "time_in_tolerance_fraction": 0.035584145483767274,
+        "time_to_held_success_s": 4.45960451977401,
+        "episode_reward": -21.898720989003778,
+        "episode_length_s": 16.017057291666667,
+        "action_near_limit_fraction": 0.4870281274779295,
+        "torque_saturation_fraction": 0.15681354532680392,
+        "max_abs_joint_velocity": 5.260496616363525,
+        "first_goal_held_success_rate": 0.4609375,
+        "goals_completed_per_episode": 0.6328125,
+        "max_consecutive_goals": 5,
+        "target_completion_rate": 0.3875598086124402,
+        "mean_time_per_completed_goal_s": 13.996388888888893,
+        "commanded_rotation_deg_per_episode": 12.65625,
+        "mean_tip_contacts": 2.5613628953947027,
+        "action_std": 1.7891194820404053,
+        "stage": "A"
+      },
+      "gate_passed": false
+    },
+    "E1_horizon": {
+      "status": "completed",
+      "spec": {
+        "name": "E1_horizon",
+        "overrides": [
+          "agent.algorithm.gamma=0.998"
+        ]
+      },
+      "warm_start": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-09-29_00-00-00_warm_start_v4/model_0.pt",
+      "checkpoint": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-09-30_20-34-47_overnight_E1_horizon/model_599.pt",
+      "metrics": {
+        "episodes": 128,
+        "held_success_rate": 0.0,
+        "entered_tolerance_rate": 0.0,
+        "drop_rate": 0.53125,
+        "initial_error_deg": 19.999996003091244,
+        "final_error_deg": 76.65125064487013,
+        "final_error_deg_not_dropped": 26.060882667670324,
+        "final_within_tolerance": 0.0,
+        "mean_error_deg": 27.655441352167983,
+        "min_error_deg": 15.742747877952711,
+        "time_in_tolerance_fraction": 0.0,
+        "time_to_held_success_s": NaN,
+        "episode_reward": -52.40200054179877,
+        "episode_length_s": 15.677994791666666,
+        "action_near_limit_fraction": 0.013112461678826142,
+        "torque_saturation_fraction": 0.12686761899506951,
+        "max_abs_joint_velocity": 5.065975666046143,
+        "first_goal_held_success_rate": 0.0,
+        "goals_completed_per_episode": 0.0,
+        "max_consecutive_goals": 0,
+        "target_completion_rate": 0.0,
+        "mean_time_per_completed_goal_s": 0.0,
+        "commanded_rotation_deg_per_episode": 0.0,
+        "mean_tip_contacts": 2.797443278596104,
+        "action_std": 0.1584564447402954,
+        "stage": "A"
+      },
+      "gate_passed": false
+    },
+    "E5_goal10": {
+      "status": "completed",
+      "spec": {
+        "name": "E5_goal10",
+        "bootstrap": true,
+        "overrides": []
+      },
+      "warm_start": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-09-29_00-00-00_warm_start_v4/model_0.pt",
+      "checkpoint": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-09-30_21-17-00_overnight_E5_goal10_A_10deg_00000/model_599.pt",
+      "metrics": {
+        "episodes": 128,
+        "held_success_rate": 0.09375,
+        "entered_tolerance_rate": 0.296875,
+        "drop_rate": 0.6171875,
+        "initial_error_deg": 9.999998855319282,
+        "final_error_deg": 70.37455893099335,
+        "final_error_deg_not_dropped": 23.78765138464958,
+        "final_within_tolerance": 0.0,
+        "mean_error_deg": 24.392218124440433,
+        "min_error_deg": 7.032792310136923,
+        "time_in_tolerance_fraction": 0.008810865665422843,
+        "time_to_held_success_s": 3.1166666666666667,
+        "episode_reward": -126.72210096567869,
+        "episode_length_s": 14.059895833333334,
+        "action_near_limit_fraction": 0.050991985819071446,
+        "torque_saturation_fraction": 0.14278796346533895,
+        "max_abs_joint_velocity": 4.289067268371582,
+        "first_goal_held_success_rate": 0.09375,
+        "goals_completed_per_episode": 0.1015625,
+        "max_consecutive_goals": 2,
+        "target_completion_rate": 0.09219858156028368,
+        "mean_time_per_completed_goal_s": 14.523611111111114,
+        "commanded_rotation_deg_per_episode": 1.015625,
+        "mean_tip_contacts": 2.6406010209224053,
+        "action_std": 0.15373817086219788,
+        "stage": "A"
+      },
+      "gate_passed": false
+    },
+    "E4_reward_shape": {
+      "status": "completed",
+      "spec": {
+        "name": "E4_reward_shape",
+        "overrides": [
+          "env.orientation_baseline=false"
+        ]
+      },
+      "warm_start": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-09-29_00-00-00_warm_start_v4/model_0.pt",
+      "checkpoint": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-09-30_22-01-10_overnight_E4_reward_shape/model_599.pt",
+      "metrics": {
+        "episodes": 128,
+        "held_success_rate": 0.078125,
+        "entered_tolerance_rate": 0.1796875,
+        "drop_rate": 0.5546875,
+        "initial_error_deg": 19.999996003091248,
+        "final_error_deg": 75.78425310538503,
+        "final_error_deg_not_dropped": 39.903442069751605,
+        "final_within_tolerance": 0.0,
+        "mean_error_deg": 32.473916082896025,
+        "min_error_deg": 12.280642509115399,
+        "time_in_tolerance_fraction": 0.008434761338692167,
+        "time_to_held_success_s": 1.5033333333333334,
+        "episode_reward": -55.86963055469096,
+        "episode_length_s": 13.933333333333334,
+        "action_near_limit_fraction": 0.01321990105865201,
+        "torque_saturation_fraction": 0.1508132849916715,
+        "max_abs_joint_velocity": 8.253229141235352,
+        "first_goal_held_success_rate": 0.078125,
+        "goals_completed_per_episode": 0.0859375,
+        "max_consecutive_goals": 2,
+        "target_completion_rate": 0.07913669064748201,
+        "mean_time_per_completed_goal_s": 13.799166666666668,
+        "commanded_rotation_deg_per_episode": 1.71875,
+        "mean_tip_contacts": 2.462783806118074,
+        "action_std": 0.18052929639816284,
+        "stage": "A"
+      },
+      "gate_passed": false
+    },
+    "E3_batch": {
+      "status": "completed",
+      "spec": {
+        "name": "E3_batch",
+        "overrides": [
+          "agent.num_steps_per_env=64"
+        ]
+      },
+      "warm_start": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-09-29_00-00-00_warm_start_v4/model_0.pt",
+      "checkpoint": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-09-30_22-43-37_overnight_E3_batch/model_599.pt",
+      "metrics": {
+        "episodes": 128,
+        "held_success_rate": 0.2890625,
+        "entered_tolerance_rate": 0.3359375,
+        "drop_rate": 0.5078125,
+        "initial_error_deg": 19.99999600309125,
+        "final_error_deg": 59.04054079445856,
+        "final_error_deg_not_dropped": 20.401510740124774,
+        "final_within_tolerance": 0.0,
+        "mean_error_deg": 21.904775033048786,
+        "min_error_deg": 8.854184313812722,
+        "time_in_tolerance_fraction": 0.01505068290328358,
+        "time_to_held_success_s": 3.3981981981981972,
+        "episode_reward": -16.73857487924397,
+        "episode_length_s": 15.942578124999999,
+        "action_near_limit_fraction": 0.004814769962674384,
+        "torque_saturation_fraction": 0.11818401636526667,
+        "max_abs_joint_velocity": 6.875066757202148,
+        "first_goal_held_success_rate": 0.2890625,
+        "goals_completed_per_episode": 0.390625,
+        "max_consecutive_goals": 5,
+        "target_completion_rate": 0.2808988764044944,
+        "mean_time_per_completed_goal_s": 13.216066066066071,
+        "commanded_rotation_deg_per_episode": 7.8125,
+        "mean_tip_contacts": 2.7211949230633024,
+        "action_std": 0.1541208028793335,
+        "stage": "A"
+      },
+      "gate_passed": false
+    },
+    "E6_combination": {
+      "status": "completed",
+      "spec": {
+        "name": "E6_combination",
+        "std1": true,
+        "overrides": [
+          "agent.algorithm.gamma=0.998",
+          "agent.algorithm.entropy_coef=0.005"
+        ]
+      },
+      "warm_start": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-09-29_00-00-01_warm_start_std1/model_0.pt",
+      "checkpoint": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-10-01_00-05-48_overnight_E6_combination/model_599.pt",
+      "metrics": {
+        "episodes": 128,
+        "held_success_rate": 0.296875,
+        "entered_tolerance_rate": 0.359375,
+        "drop_rate": 0.3984375,
+        "initial_error_deg": 19.99999600309125,
+        "final_error_deg": 44.85485561358549,
+        "final_error_deg_not_dropped": 20.421313034252293,
+        "final_within_tolerance": 0.0,
+        "mean_error_deg": 23.78388866003458,
+        "min_error_deg": 8.105431640189302,
+        "time_in_tolerance_fraction": 0.015013635852402745,
+        "time_to_held_success_s": 7.991666666666667,
+        "episode_reward": -25.097401500330307,
+        "episode_length_s": 16.679036458333332,
+        "action_near_limit_fraction": 0.49282156739738603,
+        "torque_saturation_fraction": 0.1192508377686539,
+        "max_abs_joint_velocity": 5.221390247344971,
+        "first_goal_held_success_rate": 0.296875,
+        "goals_completed_per_episode": 0.296875,
+        "max_consecutive_goals": 1,
+        "target_completion_rate": 0.2289156626506024,
+        "mean_time_per_completed_goal_s": 23.983333333333345,
+        "commanded_rotation_deg_per_episode": 5.9375,
+        "mean_tip_contacts": 2.3003101999789064,
+        "action_std": 1.7400054931640625,
+        "stage": "A"
+      },
+      "gate_passed": false
+    }
+  }
+}

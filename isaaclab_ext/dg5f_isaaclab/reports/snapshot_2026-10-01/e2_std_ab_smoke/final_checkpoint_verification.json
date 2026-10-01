@@ -1,0 +1,62 @@
+{
+  "A": {
+    "source_hash_unchanged": true,
+    "checkpoint": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-10-01_20-08-06_e2_std_ab_A_100/model_3699.pt",
+    "iteration": 3699,
+    "changed_tensors": {
+      "actor.": 6,
+      "critic.": 6,
+      "actor_obs_normalizer.": 4,
+      "critic_obs_normalizer.": 4
+    },
+    "Adam_steps_added_per_parameter": [
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0
+    ],
+    "final_std_mean": 0.5021930932998657,
+    "final_Adam_lrs": [
+      3.3750000000000014e-05
+    ]
+  },
+  "B": {
+    "source_hash_unchanged": true,
+    "checkpoint": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-10-01_20-17-13_e2_std_ab_B_100/model_3699.pt",
+    "iteration": 3699,
+    "changed_tensors": {
+      "actor.": 6,
+      "critic.": 6,
+      "actor_obs_normalizer.": 4,
+      "critic_obs_normalizer.": 4
+    },
+    "Adam_steps_added_per_parameter": [
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0,
+      2000.0
+    ],
+    "final_std_mean": 5.244720935821533,
+    "final_Adam_lrs": [
+      0.0005766503906250003
+    ]
+  }
+}

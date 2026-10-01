@@ -39,11 +39,19 @@ parser.add_argument("--export_io_descriptors", action="store_true", default=Fals
 parser.add_argument(
     "--ray-proc-id", "-rid", type=int, default=None, help="Automatically configured by Ray integration, otherwise None."
 )
+parser.add_argument("--restore_continuation_state", action="store_true",
+                    help="Resume the saved adaptive LR and advance the last-completed iteration index")
+parser.add_argument("--verify_resume_state", action="store_true",
+                    help="Before training verify exact model/Adam/iteration/LR and unchanged env/reward config")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+if args_cli.restore_continuation_state and not args_cli.resume:
+    parser.error("--restore_continuation_state requires --resume")
+if args_cli.verify_resume_state and not args_cli.restore_continuation_state:
+    parser.error("--verify_resume_state requires --restore_continuation_state")
 
 # always enable cameras to record video
 if args_cli.video:
@@ -213,10 +221,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
+        if args_cli.restore_continuation_state:
+            from continuation_state import restore_continuation_state
+            lr, next_iteration = restore_continuation_state(runner)
+            agent_cfg.algorithm.learning_rate = lr
+            print(f"[CONTINUE] restored adaptive lr={lr:.12g}; next iteration={next_iteration}", flush=True)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    if args_cli.verify_resume_state:
+        from resume_verification import verify_resume_start
+        verify_resume_start(runner, resume_path, log_dir, agent_cfg.algorithm.entropy_coef)
 
     # run training
     remaining = agent_cfg.max_iterations

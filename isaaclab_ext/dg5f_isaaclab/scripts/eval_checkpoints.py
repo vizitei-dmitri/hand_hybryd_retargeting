@@ -31,6 +31,8 @@ parser.add_argument("--goal_angle_deg", type=float, default=None,
                          "sampled initial error is at least the latter, so changing one alone trips "
                          "that assert. A checkpoint must be judged at the angle it is being trained "
                          "at, or the gate measures a different task.")
+parser.add_argument("--orientation_baseline", choices=("true", "false"), default=None,
+                    help="Match E4 training reward when reporting episode return")
 parser.add_argument("--output", type=Path, required=True)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -66,6 +68,8 @@ def parse_runs():
 
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
+    if args_cli.orientation_baseline is not None:
+        env_cfg.orientation_baseline = args_cli.orientation_baseline == "true"
     if args_cli.stage is not None:
         env_cfg.goal_stream_stage = args_cli.stage
     if args_cli.goal_angle_deg is not None:

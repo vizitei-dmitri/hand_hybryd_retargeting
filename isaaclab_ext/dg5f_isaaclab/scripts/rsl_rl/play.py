@@ -14,6 +14,7 @@ from isaaclab.app import AppLauncher
 
 # local imports
 import cli_args  # isort: skip
+from checkpoint_compat import prepare_inference_checkpoint  # isort: skip
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
@@ -33,6 +34,8 @@ parser.add_argument(
     action="store_true",
     help="Use the pre-trained checkpoint from Nucleus.",
 )
+parser.add_argument("--wait_for_gpu", action="store_true", help="Wait for the training/evaluation campaign before opening GUI")
+parser.add_argument("--max_steps", type=int, default=0, help="Stop cleanly after this many steps (0: unlimited)")
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -46,6 +49,16 @@ if args_cli.video:
 
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
+
+# Reserve BEFORE Kit/Vulkan startup: even a single-env GUI can OOM beside training.
+_gui_gpu_lease = None
+if not args_cli.headless:
+    from pathlib import Path
+    from play_resource_guard import reserve_gui_gpu
+    try:
+        _gui_gpu_lease = reserve_gui_gpu(Path(__file__).resolve().parents[2], args_cli.wait_for_gpu)
+    except RuntimeError as error:
+        parser.error(str(error))
 
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
@@ -145,7 +158,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    runner.load(resume_path)
+    inference_path = prepare_inference_checkpoint(resume_path)
+    runner.load(inference_path, load_optimizer=False)
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
@@ -188,8 +202,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obs, _, dones, _ = env.step(actions)
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
+        timestep += 1
+        if args_cli.max_steps and timestep >= args_cli.max_steps:
+            break
         if args_cli.video:
-            timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
@@ -199,6 +215,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
 
+    print(f"[PLAY] completed {timestep} steps", flush=True)
+    if hasattr(env.unwrapped, "consecutive_successes"):
+        print(f"[PLAY] consecutive_successes={float(env.unwrapped.consecutive_successes.mean()):.4f}", flush=True)
     # close the simulator
     env.close()
 

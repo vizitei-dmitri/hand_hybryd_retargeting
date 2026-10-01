@@ -17,9 +17,9 @@ thresholds in StreamCurriculumCfg, and it never lowers them.
 import argparse
 import importlib.util
 import json
-import subprocess
 import sys
-import time
+
+from overnight_process import run_checked
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,12 +49,10 @@ def run(command, log_path, description):
     log_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"[STREAM] {description}\n[STREAM]   {' '.join(str(c) for c in command)}\n"
           f"[STREAM]   log: {log_path}", flush=True)
-    started = time.time()
-    with log_path.open("w") as handle:
-        result = subprocess.run(command, cwd=ROOT, stdout=handle, stderr=subprocess.STDOUT)
-    print(f"[STREAM]   exit={result.returncode} after {time.time() - started:.0f}s", flush=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"{description} failed; see {log_path}")
+    expected = None
+    if "--resume" in command:
+        expected = LOG_ROOT / command[command.index("--load_run") + 1] / command[command.index("--checkpoint") + 1]
+    run_checked(command, log_path, ROOT, expected=expected)
 
 
 def latest_checkpoint(run_dir: Path) -> tuple[str, int]:
@@ -113,10 +111,22 @@ def main():
                              "first, then return to --target_angle_deg in the same stage with the "
                              "same policy. The gate is the same at both angles.")
     parser.add_argument("--resume_state", action="store_true", help="Continue from an existing state file")
+    parser.add_argument("--eval_every_iterations", type=int, default=None,
+                        help="Segment size; gate thresholds remain unchanged")
+    parser.add_argument("--run_prefix", default="stream", help="Isolate run names for an A/B campaign")
+    parser.add_argument("--action_std_watchdog", type=float, default=None,
+                        help="Per-run exploration threshold; defaults to the low-noise curriculum value")
+    parser.add_argument("--entropy_coef", type=float, default=None,
+                        help="Keep the requested exploration regime across all stream segments")
     args = parser.parse_args()
+    if args.action_std_watchdog is not None and not (0 < args.action_std_watchdog < float("inf")):
+        parser.error("--action_std_watchdog must be finite and positive")
+    if args.eval_every_iterations is not None and args.eval_every_iterations < 1:
+        parser.error("--eval_every_iterations must be positive")
 
     cfg = STREAM_CURRICULUM
     eval_envs = args.eval_num_envs or cfg.eval_episodes
+    std_watchdog = args.action_std_watchdog if args.action_std_watchdog is not None else cfg.action_std_watchdog
     if args.state.exists() and args.resume_state:
         state = json.loads(args.state.read_text())
         print(f"[STREAM] resuming state: stage {state['stage']} at {state['total_iterations']} iterations")
@@ -149,10 +159,10 @@ def main():
     save_state()
     while state["total_iterations"] < args.max_iterations and state["stopped"] is None:
         stage = state["stage"]
-        segment = min(cfg.eval_every_iterations, args.max_iterations - state["total_iterations"])
+        segment = min(args.eval_every_iterations or cfg.eval_every_iterations, args.max_iterations - state["total_iterations"])
         angle = state["angle_deg"]
         suffix = "" if state["phase"] == "target" else f"_{round(angle)}deg"
-        tag = f"stream_{stage}{suffix}_{state['total_iterations']:05d}"
+        tag = f"{args.run_prefix}_{stage}{suffix}_{state['total_iterations']:05d}"
         # --resume/--load_run/--checkpoint as CLI FLAGS, never as hydra overrides: cli_args.py does
         # `if args_cli.resume is not None: agent_cfg.resume = args_cli.resume`, and --resume is a
         # store_true with default False, so it is never None and unconditionally overwrites the
@@ -169,6 +179,8 @@ def main():
                    f"env.goal_stream_angle_deg={angle}",
                    f"env.min_initial_goal_error_deg={angle}",
                    f"agent.run_name={tag}"]
+        if args.entropy_coef is not None:
+            command += [f"agent.algorithm.entropy_coef={args.entropy_coef}"]
         if state["total_iterations"] == 0 and args.freeze_actor_iterations:
             command += ["--freeze_actor_iterations", str(args.freeze_actor_iterations)]
         run(command, args.log_dir / f"{tag}_train.log", f"train stage {stage}: {segment} iterations")
@@ -204,10 +216,10 @@ def main():
         window = [e for e in state["evaluations"]
                   if e["stage"] == stage and e.get("angle_deg", angle) == angle][-cfg.watchdog_window:]
         std = metrics.get("action_std")
-        if std is not None and std > cfg.action_std_watchdog and len(window) == cfg.watchdog_window:
+        if std is not None and std > std_watchdog and len(window) == cfg.watchdog_window:
             best = max(e["metrics"]["goals_completed_per_episode"] for e in window[:-1])
             if metrics["goals_completed_per_episode"] <= best:
-                stop(f"action_std {std:.3f} above {cfg.action_std_watchdog} with no deterministic "
+                stop(f"action_std {std:.3f} above {std_watchdog} with no deterministic "
                      f"improvement over the last {cfg.watchdog_window} evaluations")
                 break
 

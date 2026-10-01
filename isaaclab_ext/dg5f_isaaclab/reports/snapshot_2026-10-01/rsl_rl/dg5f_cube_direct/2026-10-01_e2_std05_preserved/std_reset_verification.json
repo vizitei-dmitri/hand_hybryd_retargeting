@@ -1,0 +1,16 @@
+{
+  "source": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-10-01_14-39-27_e2_continue_3600/model_3599.pt",
+  "derived": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-10-01_e2_std05_preserved/model_3599.pt",
+  "source_sha256": "ee1f618f08abb34c9c23a09fbd386cc432a61022b93c838f8349554d89bd3c22",
+  "derived_sha256": "9accb125331c542a4151e01f897ad6ded729bc0b11b4e7e21ce983e8a4397ff3",
+  "changed_fields": [
+    "/model_state_dict/std"
+  ],
+  "source_std_mean": 5.121748924255371,
+  "derived_std": 0.5,
+  "iter": 3599,
+  "optimizer_lrs": [
+    0.0002562890625000001
+  ],
+  "note": "params copied from source for inference; continuation must explicitly set entropy_coef=0.001. All Adam moments including std retained."
+}

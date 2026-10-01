@@ -1,0 +1,30 @@
+{
+  "cur/model_2000": {
+    "episodes": 128,
+    "held_success_rate": 0.8203125,
+    "entered_tolerance_rate": 0.875,
+    "drop_rate": 0.75,
+    "initial_error_deg": 19.999996003091248,
+    "final_error_deg": 60.96024541192356,
+    "final_error_deg_not_dropped": 22.531490039349123,
+    "final_within_tolerance": 0.0078125,
+    "mean_error_deg": 16.655187142898505,
+    "min_error_deg": 2.6378319640631074,
+    "time_in_tolerance_fraction": 0.16629191706620908,
+    "time_to_held_success_s": 2.027619047619048,
+    "episode_reward": 63.51004562526941,
+    "episode_length_s": 15.004557291666666,
+    "action_near_limit_fraction": 0.7819709355753275,
+    "torque_saturation_fraction": 0.15255738888728698,
+    "max_abs_joint_velocity": 4.389570236206055,
+    "first_goal_held_success_rate": 0.8203125,
+    "goals_completed_per_episode": 5.34375,
+    "max_consecutive_goals": 23,
+    "target_completion_rate": 0.8423645320197044,
+    "mean_time_per_completed_goal_s": 4.976956275937548,
+    "commanded_rotation_deg_per_episode": 106.875,
+    "mean_tip_contacts": 2.555843975941933,
+    "action_std": 3.258897066116333,
+    "stage": "A"
+  }
+}

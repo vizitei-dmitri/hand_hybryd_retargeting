@@ -1,0 +1,42 @@
+{
+  "checkpoint": "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-10-01_e2_std05_preserved/model_3599.pt",
+  "checkpoint_sha256": "9accb125331c542a4151e01f897ad6ded729bc0b11b4e7e21ce983e8a4397ff3",
+  "all_model_tensors_exact": true,
+  "critic_preserved": true,
+  "normalizers_preserved": true,
+  "optimizer_exact": true,
+  "environment_and_reward_exact_except_log_dir": true,
+  "source_iteration": 3599,
+  "next_iteration": 3600,
+  "ppo_learning_rate": 0.0002562890625000001,
+  "Adam_lrs": [
+    0.0002562890625000001
+  ],
+  "entropy_coef": 0.001,
+  "std_mean": 0.5,
+  "std_min": 0.5,
+  "std_max": 0.5,
+  "std_per_action": [
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5
+  ],
+  "model_tensor_count": 21,
+  "Adam_state_entries": 13
+}

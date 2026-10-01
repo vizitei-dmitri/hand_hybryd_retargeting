@@ -43,6 +43,7 @@ from isaaclab_tasks.utils import parse_env_cfg
 
 import dg5f_isaaclab.tasks  # noqa: F401
 from dg5f_isaaclab.tasks.direct.dg5f_cube.dg5f_cube_env import DG5FCubeEnv
+from velocity_audit_metrics import velocity_details
 
 
 class AuditEnv(DG5FCubeEnv):
@@ -171,6 +172,8 @@ def main():
                 for j, name in enumerate(names)
             },
         }
+        entry["reset_aware_details"] = velocity_details(
+            q, qdot, epoch, physics_dt, names, env_cfg.disabled_joint)
         worst = sorted(entry["per_joint"].items(), key=lambda kv: -kv[1]["physx_max"])[:5]
         entry["worst_joints_by_physx_max"] = [
             {"joint": n, **v} for n, v in worst]

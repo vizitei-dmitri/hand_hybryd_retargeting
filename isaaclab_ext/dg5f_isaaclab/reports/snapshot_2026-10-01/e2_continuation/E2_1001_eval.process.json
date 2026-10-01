@@ -1,0 +1,114 @@
+{
+  "command": [
+    "/home/yoba/Documents/work/IsaacLab/env_isaaclab/bin/python",
+    "scripts/eval_checkpoints.py",
+    "--task",
+    "DG5F-Cube-Stream-Direct-v0",
+    "--headless",
+    "--num_envs",
+    "128",
+    "--seed",
+    "1234",
+    "--baselines",
+    "",
+    "--stage",
+    "A",
+    "--goal_angle_deg",
+    "20.0",
+    "--run",
+    "cur=/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/rsl_rl/dg5f_cube_direct/2026-10-01_14-39-27_e2_continue_3600:1000",
+    "--output",
+    "/home/yoba/Documents/work/hand_hybryd_retargeting/isaaclab_ext/dg5f_isaaclab/logs/e2_continuation/E2_1001_eval.json"
+  ],
+  "expected_checkpoint": null,
+  "resume_verified": true,
+  "returncode": 0,
+  "owned_process_groups": [
+    1491218
+  ],
+  "seconds": 85.95313782000449,
+  "peak_compute_MiB": 2792,
+  "peak_total_MiB": 3860,
+  "gpu_samples": [
+    {
+      "seconds": 5.1,
+      "pid": 1491218,
+      "MiB": 174
+    },
+    {
+      "seconds": 10.1,
+      "pid": 1491218,
+      "MiB": 288
+    },
+    {
+      "seconds": 15.2,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 20.2,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 25.3,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 30.3,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 35.4,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 40.4,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 45.5,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 50.6,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 55.6,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 60.7,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 65.7,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 70.8,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 75.8,
+      "pid": 1491218,
+      "MiB": 2792
+    },
+    {
+      "seconds": 80.9,
+      "pid": 1491218,
+      "MiB": 2792
+    }
+  ]
+}
