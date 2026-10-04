@@ -34,6 +34,13 @@ parser.add_argument("--goal_angle_deg", type=float, default=None,
 parser.add_argument("--orientation_baseline", choices=("true", "false"), default=None,
                     help="Match E4 training reward when reporting episode return")
 parser.add_argument("--output", type=Path, required=True)
+parser.add_argument("--smoothing_telemetry", action="store_true", help="Collect first-episode action/reward/drop diagnostics")
+parser.add_argument("--gait_telemetry", action="store_true")
+parser.add_argument("--gait_thresholds", type=Path, default=None)
+parser.add_argument("--gait_hypothesis_config", type=Path, default=None)
+parser.add_argument("--gait_reset_config", type=Path, default=None)
+parser.add_argument("--action_penalty_scale", type=float, default=None)
+parser.add_argument("--action_rate_penalty_scale", type=float, default=None)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.headless = True
@@ -68,6 +75,24 @@ def parse_runs():
 
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
+    env_cfg.track_gait_contact_points = args_cli.gait_telemetry
+    if args_cli.gait_hypothesis_config:
+        for key, value in json.loads(args_cli.gait_hypothesis_config.read_text()).items():
+            if key not in ("gait_task_gate", "gait_observation_mode"):
+                raise ValueError(f"Unexpected hypothesis override: {key}")
+            setattr(env_cfg, key, value)
+        env_cfg.resolve_control_config()
+    if args_cli.gait_reset_config:
+        for key,value in json.loads(args_cli.gait_reset_config.read_text()).items():
+            if key not in ('gait_transition_cache_path','gait_transition_fraction','gait_phase_weights'):
+                raise ValueError(f'Unexpected reset override: {key}')
+            setattr(env_cfg,key,value)
+    for key in ("action_penalty_scale", "action_rate_penalty_scale"):
+        value = getattr(args_cli, key)
+        if value is not None:
+            if value < 0:
+                raise ValueError(f"{key} must be nonnegative")
+            setattr(env_cfg, key, value)
     if args_cli.orientation_baseline is not None:
         env_cfg.orientation_baseline = args_cli.orientation_baseline == "true"
     if args_cli.stage is not None:
@@ -79,6 +104,35 @@ def main():
         env_cfg.resolve_control_config()  # re-validates the stage name and the angle vs tolerance
     env = RslRlVecEnvWrapper(gym.make(args_cli.task, cfg=env_cfg))
     raw = env.unwrapped
+    telemetry = None
+    gait = None
+    if args_cli.gait_telemetry:
+        from gait_metrics import GaitTelemetry
+        gait_rewards = raw._get_rewards
+        def sample_gait_rewards():
+            value = gait_rewards()
+            if raw.cfg.gait_task_gate:
+                unsupported = raw.tip_contact_count < 3
+                for term in ("orientation_state_reward", "orientation_progress_reward", "goal_dwell_reward", "success_bonus"):
+                    if term in raw.reward_terms and bool((raw.reward_terms[term][unsupported] != 0).any()):
+                        raise RuntimeError(f"H2 task gate violation: {term}")
+            if gait is not None:
+                gait.sample()
+            return value
+        raw._get_rewards = sample_gait_rewards
+    if args_cli.smoothing_telemetry:
+        from smoothing_telemetry import Telemetry
+        original_rewards, original_apply = raw._get_rewards, raw._apply_action
+        def measured_rewards():
+            value = original_rewards()
+            if telemetry is not None:
+                telemetry.reward_sample()
+            return value
+        def measured_apply():
+            original_apply()
+            if telemetry is not None:
+                telemetry.physics_sample()
+        raw._get_rewards, raw._apply_action = measured_rewards, measured_apply
     tol_deg = math.degrees(env_cfg.success_tolerance_rad)
 
     records = {}
@@ -131,7 +185,13 @@ def main():
                           f"config for {args_cli.task}", flush=True)
                 runners[run_dir] = OnPolicyRunner(env, agent, log_dir=None, device=raw.device)
             runner = runners[run_dir]
+            print(f"[INFO]: Loading model checkpoint from: {path.resolve()}", flush=True)
             runner.load(str(path))
+            import sys
+            sys.path.insert(0, str(Path(__file__).resolve().parent / "rsl_rl"))
+            from resume_verification import actor_fingerprint
+            fingerprint = actor_fingerprint(runner.alg.policy)
+            print(f"[ACTOR_FINGERPRINT] {fingerprint}", flush=True)
             policy = runner.get_inference_policy(device=raw.device)
             # The learned exploration std. Not used by the deterministic rollout below, but it is
             # what the training watchdog reads: std growing while these metrics do not improve is
@@ -143,6 +203,10 @@ def main():
         with torch.inference_mode():
             env.reset()
             records.clear()  # the reset above closed the previous policy's episodes
+            if args_cli.gait_telemetry:
+                gait = GaitTelemetry(raw)
+            if args_cli.smoothing_telemetry:
+                telemetry = Telemetry(raw)
             obs = env.get_observations()
             near, sat, vel, steps = 0.0, 0.0, 0.0, 0
             while len(records) < raw.num_envs and steps < raw.max_episode_length + 5:
@@ -152,6 +216,8 @@ def main():
                     actions = 2 * torch.rand((raw.num_envs, env_cfg.action_space), device=raw.device) - 1
                 else:
                     actions = policy(obs)
+                if telemetry is not None:
+                    telemetry.mu = actions
                 obs, _, _, extras = env.step(actions)
                 log = extras["log"]
                 near += log["action_near_limit_fraction"].item()
@@ -196,6 +262,15 @@ def main():
             "stage": getattr(env_cfg, "goal_stream_stage", None) if getattr(env_cfg, "goal_stream", False) else None,
         }
         r = results[name]
+        r["actor_output_fingerprint"] = fingerprint if path is not None else None
+        if gait is not None:
+            args_cli.output.parent.mkdir(parents=True, exist_ok=True)
+            thresholds = json.loads(args_cli.gait_thresholds.read_text()) if args_cli.gait_thresholds else None
+            r["gait"] = gait.save(args_cli.output.with_name(args_cli.output.stem + '_' + name.replace('/', '_') + '_trajectory.npz'), thresholds)
+            gait = None
+        if telemetry is not None:
+            r["smoothing"] = telemetry.summary()
+            telemetry = None
         print(f"[EVAL] {name:>18} n={n} held={r['held_success_rate']:.3f} entered={r['entered_tolerance_rate']:.3f}"
               f" in_tol={r['time_in_tolerance_fraction']:.3f} drop={r['drop_rate']:.3f}"
               f" final={r['final_error_deg']:.1f} final_kept={r['final_error_deg_not_dropped']:.1f}"

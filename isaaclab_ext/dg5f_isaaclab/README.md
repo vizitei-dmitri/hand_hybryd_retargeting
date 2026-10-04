@@ -695,3 +695,85 @@ RSL-RL 3.1.2 не имеет штатного ограничения std, а п�
 потолок реализован watchdog-ом: std выше 0.35 ПРИ отсутствии улучшения детерминированных метрик
 за последние три оценки останавливает прогон. Связка важна: высокий std при растущем качестве —
 это исследование, а не расхождение.
+
+## Исследование смены опор пальцами (2026-10-02)
+
+`logs/gait_research/REQUEST.txt` фиксирует задание; состояние длительной работы —
+`logs/gait_research/NIGHT_STATE.md`. Награда, физика, поток целей 20° и integrated-delta
+с шагом 1° для H1 остаются прежними. Исходный E2 выбран по детерминированным оценкам,
+а не по training reward. В этой ревизии отдельного проверенного raw-μ штрафа или
+нового контактного ограничения нет.
+
+`eval_checkpoints.py --gait_telemetry --gait_thresholds <json>` записывает для первых
+эпизодов контактные центроиды PhysX в системе куба, позиции/скорости кончиков,
+конфигурации суставов, контакты ладони, движения куба и граф пятибитных масок.
+В NPZ сохраняются и терминальные шаги; переходы через reset исключены. В битовой
+маске младший бит соответствует первому пальцу. Силы используются только для
+существующего порога контакта, абсолютные значения не считаются калиброванными.
+Параметр `track_gait_contact_points` включает только чтение геометрии сенсора;
+в обучении он выключен. Контактная геометрия не добавляется в наблюдения PPO.
+
+Порог переноса фиксируется до генерации/A-B: два кластера логарифма длительности
+отрыва отделяют короткие события. P99 смещения коротких событий плюс разница P99–P95
+задаёт границу за пределами дребезга. Это операционное определение, а не доказательство
+оптимальной биомеханической стратегии. Для значимого события нужны два сохраняющихся
+опорных пальца на >=90% интервала и отсутствие ладонного контакта. Строгий успешный
+цикл дополнительно требует устойчивого повторного контакта, возврата к >=3 кончикам,
+полного окна наблюдения 0.5 с без падения и следующей выполненной цели в этом окне.
+Последний критерий консервативен: медленные корректные переносы могут не учитываться.
+
+`generate_gait_transition_cache.py` использует штатный `DifferentialIKController` DLS
+только для одного пальца. Команды идут через существующие FIFO, интегратор и PD;
+состояния берутся из физически выполненной траектории. Стабильные кэши не изменяются.
+`gait_cache_sanity.py` проверяет холодные сбросы с точным состоянием и малыми возмущениями.
+`gait_transition_videos.py` повторно исполняет сохранённые действия в физике и помечает
+в manifest отдельно успешные и неудачные повторения; это не анимация интерполированных q.
+
+Формат `assets/gait_cache.py`, schema_version=1, хранит q/dq, q_cmd, позу/скорости куба
+в системе ладони, FIFO, предыдущую команду, применённое действие, grasp_command,
+cube_anchor и метаданные фазы/пальца/источника. `source_type` допускает будущие scripted,
+teleop и human_retargeted источники. Контактный solver warm start не сериализуется,
+поэтому необходима отдельная проверка повторных сбросов. Глобальный batch EMA grasp
+quality не является состоянием отдельного эпизода и не восстанавливается из снимка.
+Историческая цель и счётчики никогда не переносятся; новая цель строится от ориентации
+куба в снимке. Stable-only путь не потребляет дополнительных случайных чисел.
+
+Opt-in параметры среды:
+
+- `env.gait_transition_cache_path=<проверенный .npz>`;
+- `env.gait_transition_fraction=0.3`;
+- `env.gait_phase_weights=[0,0.125,0.125,0.35,0.25,0.15,0]` для pre-release,
+  released, early transfer, mid transfer, near contact, initial recontact, settled.
+
+Отсутствующая фаза с положительным весом вызывает ошибку; молчаливого изменения
+распределения нет. Нулевой fraction оставляет прежние stable resets.
+`train.py --verify_reset_config <json>` разрешает при resume только три явно заданных
+поля reset distribution; остальные настройки среды/награды и тензоры модели/Adam
+проверяются на совпадение. `--checkpoint_offsets 100,300,400` сохраняет эти точки без
+перезапуска симулятора. Отпечаток актора вычисляется на общем фиксированном наборе
+наблюдений и записывается до оптимизации.
+
+
+### Controlled gait hypothesis tree (2026-10-04)
+
+`scripts/gait_tree.py` resumes B_MIXED_400 under a single GPU lease and persists
+`logs/gait_tree/night_state.json`, `NIGHT_STATE.md`, and the required decision log.
+The frozen design, input request, source identity, and deletion manifest are in that directory.
+No commits are made. Resume by running the same controller inside the portable tmux session;
+completed jobs and complete evaluations are reused, and original deadlines are retained.
+
+Opt-in `env.gait_task_gate=true` requires >=3 tips for orientation state/progress,
+dwell and held-success eligibility. It does not change termination, support/safety rewards,
+control penalties or physics. `env.gait_observation_mode` accepts `none`, `contacts` (+5),
+`mechanics` (+12: global minimum, six eigenvalues, five leave-one-out minima), and
+`timers` (+20: five flags and three timers per finger). Mechanics uses the existing isotropic
+point-force Gramian with moment arms expressed in units of cube half-width; it is a
+continuous geometric proxy, not a friction-cone force-closure certificate. Timers update
+once per control step and reset with the episode; all are clipped to 2 seconds.
+
+`scripts/expand_gait_checkpoint.py` copies the original actor/critic/Adam/normalizers,
+adds zero first-layer columns and Adam moments, and checks numerical behavior preservation.
+Old normalizer statistics and their count remain exact; new dimensions begin at mean0/std1.
+Training verifies all saved model and optimizer tensors before the first update and permits
+only the explicitly named hypothesis overrides. Evaluations must specify the hypothesis
+configuration and always use stable resets. None of these options alters the default task.

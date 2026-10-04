@@ -192,6 +192,19 @@ class DG5FCubeEnvCfg(DirectRLEnvCfg):
     # grasp-quality terms below are undefined from it and have to start from a grasp cache.
     # None keeps the single configured grasp; a path makes every episode start from a cached grasp.
     grasp_cache_path: str | None = None
+    # Read-only contact geometry for gait diagnostics/cache generation; no physics changes.
+    track_gait_contact_points = False
+    # Empty string, NOT None: Isaac Lab's update_class_from_dict checks
+    # `isinstance(value, type(obj_mem))` against the attribute's CURRENT value
+    # (isaaclab/utils/dict.py:149), so a field sitting at None can never be overridden from the
+    # command line -- `env.gait_transition_cache_path=/path.npz` aborts with
+    # "Expected: <class 'NoneType'>, Received: <class 'str'>". That is what killed the H1_B branch.
+    # `grasp_cache_path` escapes it only because DG5FCubeStreamEnvCfg already assigns it a str.
+    # The env gates on `if not cfg.gait_transition_cache_path`, so "" still means "disabled".
+    gait_transition_cache_path: str = ""
+    gait_transition_fraction = 0.0
+    # pre, released, early, mid, near-contact, recontact, settled
+    gait_phase_weights = (0.0, 0.125, 0.125, 0.35, 0.25, 0.15, 0.0)
     # Required by every contact term. 6 cube-filtered sensors (5 tips + palm), not all 28 links.
     enable_contact_sensors = False
     tip_contact_force_n = 0.05
@@ -295,6 +308,9 @@ class DG5FCubeEnvCfg(DirectRLEnvCfg):
     def __post_init__(self):
         self.resolve_control_config()
 
+    gait_task_gate: bool = False
+    gait_observation_mode: str = "none"
+
     def resolve_control_config(self):
         """Apply the JSON once per config resolution and derive the policy layout."""
         if self.control_mode not in CONTROL_MODES:
@@ -320,6 +336,10 @@ class DG5FCubeEnvCfg(DirectRLEnvCfg):
         self.observation_space = (
             self.privileged_observation_space + self.action_space * self.action_history_steps + self.action_space
         )
+        feature_widths = {"none": 0, "contacts": 5, "mechanics": 12, "timers": 20}
+        if self.gait_observation_mode not in feature_widths:
+            raise ValueError("Unknown gait observation mode")
+        self.observation_space += feature_widths[self.gait_observation_mode]
         actuator = self.robot_cfg.actuators["fingers"]
         for name, values in data.parameters.items():
             setattr(actuator, name, values.copy())

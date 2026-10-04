@@ -31,3 +31,21 @@ def test_free_gpu_lease_is_held_until_closed(tmp_path, monkeypatch):
         module.reserve_gui_gpu(tmp_path)
     lease.close()
     module.reserve_gui_gpu(tmp_path).close()
+
+
+def test_verified_small_telegram_does_not_block_gui(tmp_path, monkeypatch):
+    monkeypatch.setattr(module.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout='4209, 23 MiB'))
+    monkeypatch.setattr(Path, 'readlink', lambda self: next(iter(module._DESKTOP_EXECUTABLES)))
+    module.reserve_gui_gpu(tmp_path).close()
+
+
+@pytest.mark.parametrize('row,executable', [
+    ('4209, 129 MiB', next(iter(module._DESKTOP_EXECUTABLES))),
+    ('4209, 23 MiB', Path('/usr/bin/python3')),
+    ('4209, N/A', next(iter(module._DESKTOP_EXECUTABLES))),
+])
+def test_exception_does_not_hide_other_workloads(tmp_path, monkeypatch, row, executable):
+    monkeypatch.setattr(module.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=row))
+    monkeypatch.setattr(Path, 'readlink', lambda self: executable)
+    with pytest.raises(RuntimeError, match='active compute'):
+        module.reserve_gui_gpu(tmp_path)

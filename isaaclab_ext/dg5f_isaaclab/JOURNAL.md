@@ -4,6 +4,65 @@
 История до этой ветки: ../../JOURNAL.md. Локальный журнал создан, поскольку ночное
 задание разрешает изменения только внутри isaaclab_ext/dg5f_isaaclab.
 
+## 2026-10-02 — H1: смок на 2 сидах был слеп, на 8 сидах эффект есть, но не походочный
+
+`scripts/gait_multiseed.py`, отчёт logs/gait_research/H1_MULTI_SEED_REPORT.md,
+данные logs/gait_research/h1_multiseed.json. 24 оценки: 3 чекпойнта x 8 сидов x 128
+эпизодов, детерминированные средние действия, стабильные сбросы для ВСЕХ ветвей
+(включая B, иначе старт из готовой середины перехода зачлось бы как навык). Пороги
+походки заморожены и побитово одинаковы во всех 24 прогонах: meaningful_displacement_m
+= 0.0109 м при кубе 60 мм, release_min_steps = 4.
+
+Почему ночной вердикт `not_supported_by_400_iteration_smoke` оказался несостоятелен:
+разброс B по сидам на `meaningful_events_per_episode` = 0.914..1.484, а две оценки
+смока дали ровно 0.914 и 1.484. Смок попал в оба хвоста одного распределения и
+прочитал это как противоречие между сидами. Диапазон A (1.047..1.344) целиком внутри
+диапазона B.
+
+Парно внутри сида (B-A, 95% ДИ бутстрапом по 8 сидам, не p-значения):
+- награда +25.6 [15.7, 35.7], 8/8 сидов
+- опора на два кончика +0.272 с [0.143, 0.414], 8/8
+- drop -0.059 [-0.088, -0.030], 7/8 в пользу B
+- целей/эп +0.662 [0.171, 1.099], 6/8
+- осмысл.события/эп +0.129 [0.010, 0.251], 6/8
+- доля успешных циклов +0.011 [-0.017, 0.039], 4/4 -- плоско
+- разных контактных масок +0.009 [-0.325, 0.387], 3/5 -- плоско
+
+Вывод: смешанные сбросы дали лучшую политику в целом, но НЕ более шаговую. Две
+метрики, ради которых ставился H1 (частота успешных циклов перехвата, разнообразие
+масок), не двинулись вообще. По правилам §8 задания это AMBIGUOUS, а не POSITIVE.
+
+Контроль, который делает результат нетривиальным: A и B получили ОДИНАКОВЫЕ 400
+итераций от общего чекпойнта. A за них не улучшилась (drop 0.662 против 0.641 у
+BASELINE@3600, held 0.890 против 0.883) -- то есть прирост B это эффект вмешательства,
+а не лишних итераций.
+
+§9 (не является ли компетентность B состояние-зависимой) -- ответ отрицательный, и это
+важнее самого вопроса. Избыточная дисперсия у B реальна: sd средних по сидам 0.173
+против пуассоновского предсказания sqrt(mean/128) = 0.101, отношение 1.72; у A
+отношение 1.06, то есть чистый шум выборки. Но распределение по эпизодам у A и B
+почти совпадает по форме, и доля эпизодов БЕЗ осмысленных событий идентична:
+0.417 у A против 0.419 у B (0.417 у BASELINE). Весь прирост B сидит в верхнем хвосте:
+эпизодов с 5 событиями 12 -> 28, с 6 событиями 10 -> 18, с 7 событиями 2 -> 6.
+Значит вмешательство не научило B пробовать перехват там, где A не пробует; оно
+заставило уже перехватывающие эпизоды перехватывать больше. Отсюда и тяжёлый хвост,
+который качает среднее по сиду, -- и ровно поэтому двух сидов было принципиально
+недостаточно.
+
+Ловушка окружения: структура eval-JSON вложенная, метрики лежат под ключом
+`<tag>/model_<N>`, а не в корне; в gait-секции нет `contact_switch_distance_p99`
+(есть только mean/p50/p90) и ключ масок называется `distinct_masks_per_episode`.
+Имена проверены по реальному JSON до запуска -- иначе таблица собралась бы пустой
+без всякой ошибки.
+
+Не доделано: LONG_H1 (продолжение ОБЕИХ ветвей от @400 на ~2000 итераций, оценки
+каждые 500 на панели из 3 сидов) не запускался -- жду решения пользователя. H2
+(контактный гейтинг награды) не начат. Коммитов по этой кампании нет.
+
+## Ночное сглаживание — 2026-10-01T21:53:14.068053+00:00
+
+Отчёт: logs/night_smoothing/FINAL_REPORT.md. Ветка: H; завершение: drop_materially_worse_for_two_evaluations. Физика и delta1° неизменны. Коммитов нет.
+
 ## 2026-10-01 — сохранение результатов в Git по запросу пользователя
 
 В reports/snapshot_2026-10-01 сохранены пять ключевых checkpoint (E2/3600,
@@ -210,3 +269,48 @@ CPU-проверка сравнила все тензоры: после штат
 завершённые оценки, перепускает неудавшиеся прогоны от исходного warm start;
 ошибка загрузки warm start останавливает всю лестницу. GPU-процессы очищаются
 только в собственной process group, чужие процессы не трогаются.
+
+
+## 2026-10-04 — controlled gait decision tree started
+
+User requested up to14h autonomous decision tree, no commits. ROOT verified as
+`2026-10-02_18-15-45_gait_H1_B/model_3999.pt`, SHA256
+`48522e7760cdf3d9f7913930ddb92a5f5645e545842b0168563d0177c092d5cb`.
+CONTROL_LONGISH starts at iteration4000 with exact model/Adam and std5.550039,
+LR0.0002562890625000001, entropy0.005. Physics, goals20deg and mixed70/30 resets
+remain fixed. H2 gates only task rewards/eligibility; conditional H3/H4/H5 add
+observations via zero columns and preserved optimizer state. Actual RSL actor and
+critic outputs match exactly on CPU probes for all three expansions. Frozen decisions,
+process/deadline state and reproducible dump deletion manifest: `logs/gait_tree/`.
+Results are pending; starting a run does not establish a gait improvement.
+
+### 2026-10-04 — smoke results and explicit selection review
+
+CONTROL, H2, H3, H4, H4+H2 and H5 completed300 updates each; all resume checks passed.
+H4 and H5 were replicated on8 evaluation seeds, with H5 compared against contact flags.
+H4 vs matched CONTROL: cycles0.3320->0.3838 (+15.59%,6/8 seeds), recovery+0.00486
+(7/8), goals10.789->11.230, drop0.686->0.631. The initial automatic selector rejected
+H4 because an assistant-added20% cycle-gain threshold was not reached. This cutoff was
+stronger than the user's qualitative replication requirement. On review it was explicitly
+superseded for an exploratory H4-only continuation; the original failure under that rule
+remains documented. No metric threshold was lowered and no physical parameter changed.
+
+H4's gain partly reflects longer survival: time-normalized cycles improve8.5%,6/8 seeds,
+but the paired bootstrap interval includes0. This is a modest signal, not established
+organized gaiting. H2/H4+H2 reduce gait; contact flags alone do not improve it; H5 improves
+some gait metrics but increases drop. Full measurements and selection reasoning are in
+logs/gait_tree/SMOKE_REPORT.md and SELECTION_REVIEW.json.
+
+Long H4 runs in tmux gait_tree_h4 under the original14h deadline, from
+2026-10-04_06-16-57_gait_tree_H4_GRASP_MECHANICS/model_4299.pt. First continuation
+loaded actor, critic, normalizers and Adam exactly; iteration4300, std5.85, fixed LR.
+Final reports/videos and a matched post-FIFO action audit are queued; final review pending.
+
+
+## 2026-10-04 — Gait decision tree completed
+
+H4 grasp-mechanics observation was the single long candidate after the documented selection review. Completed3000 additional updates; selected model7299. Full8-seed stable-reset evaluation (1024episodes): strictcycles/episode0.55664, meaningful relocations1.89160, goals13.94434, drop0.59277. Short H4:0.38379cycles,11.23047goals,0.63086drop. Long-minus-short cycles positive8/8seeds; pairedmean+0.17285, bootstrap95%[0.11719,0.21777]. Cycles/second0.02266→0.03273; this gain is not just longer survival. Causal H4 attribution remains limited by no equally trained long control and only one training seed.
+
+Verdict PARTIAL: more rare strict gait cycles, no established organized repeated gait. Dominant bottleneck not established; mechanics awareness is the strongest tested candidate. H2 and H4+H2 harmed useful gait; flags alone and timers did not qualify under the documented selection tests. No physics, action, threshold, or cache changes. Final std9.10093; actual delivered near-limit fraction0.94558 on matched seed31415; finite-difference qdot p993.03486rad/s, maximum3.53509 (no claim all samples obeypi).
+
+Training/evaluation/video/delivery-audit queue finished17:34MSK within original budget. Final manual review on later status turn: sampled video sequences and both plots checked;11 tests passed; fixed input hashes and originalHEAD3d9accc7f2e180ee04a1054466a07df52edf3ae2 unchanged. No commits. All four requested3-episode videos and exact demo command saved underlogs/gait_tree. FINAL_REPORT.md and final_results.json contain full tables, paired comparisons, contact/finger diagnostics, learning curve, limitations and next experiment: second training seed plus matched long control.

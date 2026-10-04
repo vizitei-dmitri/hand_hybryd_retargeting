@@ -5,6 +5,22 @@ import subprocess
 import time
 
 
+_DESKTOP_EXECUTABLES = {Path.home() / 'Downloads/tsetup.6.8.1/Telegram/Telegram'}
+
+
+def _is_small_desktop_process(row: str) -> bool:
+    """Exempt only a verified desktop executable with bounded GPU usage."""
+    try:
+        pid, memory = (field.strip() for field in row.split(','))
+        if not pid.isdecimal() or not memory.endswith(' MiB'):
+            return False
+        usage = int(memory.removesuffix(' MiB'))
+        executable = (Path('/proc') / pid / 'exe').readlink()
+        return executable in _DESKTOP_EXECUTABLES and 0 <= usage <= 128
+    except (OSError, ValueError):
+        return False
+
+
 def reserve_gui_gpu(root: Path, wait: bool = False):
     directory = root / 'logs/overnight_ab'
     directory.mkdir(parents=True, exist_ok=True)
@@ -22,7 +38,8 @@ def reserve_gui_gpu(root: Path, wait: bool = False):
             result = subprocess.run(
                 ['nvidia-smi', '--query-compute-apps=pid,used_gpu_memory', '--format=csv,noheader'],
                 capture_output=True, text=True, check=True)
-            processes = result.stdout.strip()
+            processes = '\n'.join(row for row in result.stdout.splitlines()
+                                  if row.strip() and not _is_small_desktop_process(row))
             if not processes:
                 return lease  # Keep the descriptor alive until play exits.
             if not wait:

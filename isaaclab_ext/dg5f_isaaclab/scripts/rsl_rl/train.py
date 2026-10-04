@@ -43,6 +43,18 @@ parser.add_argument("--restore_continuation_state", action="store_true",
                     help="Resume the saved adaptive LR and advance the last-completed iteration index")
 parser.add_argument("--verify_resume_state", action="store_true",
                     help="Before training verify exact model/Adam/iteration/LR and unchanged env/reward config")
+parser.add_argument("--verify_action_penalty_scale", type=float, default=None,
+                    help="Explicit expected reward-only difference permitted by resume verification")
+parser.add_argument("--verify_action_rate_penalty_scale", type=float, default=None)
+parser.add_argument("--verify_reset_config", type=str, default=None,
+                    help="JSON declaring the only allowed gait reset distribution differences")
+parser.add_argument("--expected_resume_checkpoint", type=str, default=None)
+parser.add_argument("--expected_actor_fingerprint", type=str, default=None)
+parser.add_argument("--verify_hypothesis_config", type=str, default=None)
+parser.add_argument("--checkpoint_offsets", type=str, default="",
+                    help="Extra checkpoint offsets after this resume, e.g. 100,300,400")
+parser.add_argument("--verify_fixed_lr", type=float, default=None,
+                    help="Assert fixed schedule and this actual PPO/Adam LR before and at every update")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -50,8 +62,13 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.restore_continuation_state and not args_cli.resume:
     parser.error("--restore_continuation_state requires --resume")
+if (args_cli.expected_resume_checkpoint or args_cli.expected_actor_fingerprint) and not args_cli.verify_resume_state:
+    parser.error("Expected source/actor checks require --verify_resume_state")
 if args_cli.verify_resume_state and not args_cli.restore_continuation_state:
     parser.error("--verify_resume_state requires --restore_continuation_state")
+if any(v is not None for v in (args_cli.verify_action_penalty_scale, args_cli.verify_action_rate_penalty_scale,
+                              args_cli.verify_fixed_lr)) and not args_cli.verify_resume_state:
+    parser.error("Night verification options require --verify_resume_state")
 
 # always enable cameras to record video
 if args_cli.video:
@@ -219,6 +236,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # load the checkpoint
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+        if args_cli.expected_resume_checkpoint:
+            from pathlib import Path
+            if Path(resume_path).resolve() != Path(args_cli.expected_resume_checkpoint).resolve():
+                raise RuntimeError("Resolved checkpoint differs from explicitly expected source")
         # load previously trained model
         runner.load(resume_path)
         if args_cli.restore_continuation_state:
@@ -232,7 +253,44 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
     if args_cli.verify_resume_state:
         from resume_verification import verify_resume_start
-        verify_resume_start(runner, resume_path, log_dir, agent_cfg.algorithm.entropy_coef)
+        overrides = ({"action_penalty_scale": args_cli.verify_action_penalty_scale}
+                     if args_cli.verify_action_penalty_scale is not None else None)
+        if args_cli.verify_action_rate_penalty_scale is not None:
+            overrides = {**(overrides or {}), "action_rate_penalty_scale": args_cli.verify_action_rate_penalty_scale}
+        import json
+        reset_overrides = json.load(open(args_cli.verify_reset_config)) if args_cli.verify_reset_config else None
+        hypothesis_overrides = json.load(open(args_cli.verify_hypothesis_config)) if args_cli.verify_hypothesis_config else None
+        verified = verify_resume_start(runner, resume_path, log_dir, agent_cfg.algorithm.entropy_coef, overrides, reset_overrides, hypothesis_overrides)
+        if args_cli.expected_actor_fingerprint and verified["actor_output_fingerprint"] != args_cli.expected_actor_fingerprint:
+            raise RuntimeError("Deterministic actor fingerprint differs BEFORE optimization")
+    if args_cli.verify_fixed_lr is not None:
+        expected_lr = args_cli.verify_fixed_lr
+        def check_fixed_lr():
+            if runner.alg.schedule != "fixed" or runner.alg.learning_rate != expected_lr:
+                raise RuntimeError("Fixed PPO learning rate/schedule does not match expectation")
+            if any(group["lr"] != expected_lr for group in runner.alg.optimizer.param_groups):
+                raise RuntimeError("Fixed Adam learning rate does not match expectation")
+        check_fixed_lr()
+        original_log = runner.log
+        def verified_log(locs, *args, **kwargs):
+            check_fixed_lr()
+            print(f"[FIXED_LR] iteration={locs['it']} lr={runner.alg.learning_rate:.17g} "
+                  f"std={float(runner.alg.policy.std.mean()):.7f} stage={env_cfg.goal_stream_stage}", flush=True)
+            return original_log(locs, *args, **kwargs)
+        runner.log = verified_log
+        print(f"[FIXED_LR_START] iteration={runner.current_learning_iteration} lr={expected_lr:.17g} "
+              f"stage={env_cfg.goal_stream_stage}", flush=True)
+
+    if args_cli.checkpoint_offsets:
+        start_iteration = runner.current_learning_iteration
+        requested_iterations = {start_iteration + int(x) - 1 for x in args_cli.checkpoint_offsets.split(',')}
+        offset_log = runner.log
+        def save_requested_checkpoints(locs, *args, **kwargs):
+            result = offset_log(locs, *args, **kwargs)
+            if locs['it'] in requested_iterations:
+                runner.save(os.path.join(log_dir, f"model_{locs['it']}.pt"))
+            return result
+        runner.log = save_requested_checkpoints
 
     # run training
     remaining = agent_cfg.max_iterations

@@ -71,7 +71,8 @@ class DG5FCubeEnv(DirectRLEnv):
             raise ValueError("Invalid target angle range")
         if sum(value * value for value in cfg.target_axis_in_palm) <= 0:
             raise ValueError("Target rotation axis must be nonzero")
-        needs_contacts = (cfg.tip_contact_reward or cfg.palm_contact_penalty or cfg.grasp_quality_scale
+        needs_contacts = (cfg.gait_task_gate or cfg.gait_observation_mode != "none"
+                          or cfg.tip_contact_reward or cfg.palm_contact_penalty or cfg.grasp_quality_scale
                           or cfg.grasp_deficit_scale or cfg.grasp_quality_deficit_scale
                           or cfg.max_time_without_tip_contact_s is not None)
         if needs_contacts and not cfg.enable_contact_sensors:
@@ -155,6 +156,8 @@ class DG5FCubeEnv(DirectRLEnv):
         # Always defined so the log schema does not depend on the contact sensors being on.
         self.tip_contact_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.tip_in_contact = torch.zeros((self.num_envs, len(self.tip_ids)), dtype=torch.bool, device=self.device)
+        self.gait_timers = torch.zeros((self.num_envs, 5, 3), device=self.device)
+        self.gait_previous_contacts = self.tip_in_contact.clone()
         self.palm_contact_force = torch.zeros(self.num_envs, device=self.device)
         self.tip_contact_sum = torch.zeros(self.num_envs, device=self.device)
         self.steps_without_tip_contact = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -194,6 +197,28 @@ class DG5FCubeEnv(DirectRLEnv):
                       f" ({self.primary_grasp_count}) / {cfg.mix_cache_fraction:.0%} mix"
                       f" ({len(caches[1])})")
         self.error_sum = torch.zeros(self.num_envs, device=self.device)
+        self.gait_cache = None
+        self.gait_cache_sha256 = None
+        self.gait_last_picks = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
+        if not 0 <= cfg.gait_transition_fraction <= 1:
+            raise ValueError("gait_transition_fraction must be in [0,1]")
+        if cfg.gait_transition_fraction > 0:
+            if not cfg.gait_transition_cache_path:
+                raise ValueError("Transition resets require an explicit validated cache")
+            from dg5f_isaaclab.assets.gait_cache import load_gait_cache, DYNAMIC_FIELDS
+            arrays, self.gait_cache_sha256 = load_gait_cache(
+                cfg.gait_transition_cache_path, cfg.actuated_joint_names, self.action_queue.history_steps)
+            self.gait_cache = {k: torch.as_tensor(arrays[k], device=self.device) for k in DYNAMIC_FIELDS}
+            weights = torch.as_tensor(cfg.gait_phase_weights, device=self.device)
+            if weights.shape != (7,) or (weights < 0).any() or weights.sum() <= 0:
+                raise ValueError("Invalid gait phase distribution")
+            phases = torch.as_tensor(arrays["phase"], device=self.device)
+            counts = torch.bincount(phases, minlength=7)
+            if ((weights > 0) & (counts == 0)).any():
+                raise ValueError("Configured transition phase absent from validated cache; explicitly revise phase weights")
+            self.gait_sample_weights = weights[phases] / counts[phases]
+            print(f"[GAIT_CACHE] sha256={self.gait_cache_sha256} n={len(phases)} fraction={cfg.gait_transition_fraction}"
+                  f" phase_weights={weights.tolist()} phase_counts={counts.tolist()}")
         self.error_min = torch.full((self.num_envs,), math.inf, device=self.device)
         self.initial_orientation_error = torch.zeros(self.num_envs, device=self.device)
         # A success only counts once a policy action has actually been delivered (FIFO delay).
@@ -269,6 +294,7 @@ class DG5FCubeEnv(DirectRLEnv):
             for link in list(self.cfg.fingertip_body_names) + [self.cfg.palm_body_name]:
                 sensor = ContactSensor(ContactSensorCfg(
                     prim_path=f"/World/envs/env_.*/Robot/{link}",
+                    track_contact_points=self.cfg.track_gait_contact_points,
                     filter_prim_paths_expr=["/World/envs/env_.*/Cube"]))
                 self.scene.sensors[f"contact_{link}"] = sensor
                 self.contact_sensors[link] = sensor
@@ -335,6 +361,11 @@ class DG5FCubeEnv(DirectRLEnv):
             self.goal_quat, tip_positions, self.action_queue.history.flatten(start_dim=1),
             self.joint_command,
         ), dim=-1)
+        if self.cfg.gait_observation_mode != "none":
+            from .gait_features import observation_features
+            features = observation_features(self.cfg.gait_observation_mode, self.tip_in_contact,
+                self.tip_pos_palm - self.cube_pos[:, None, :], self.gait_timers)
+            obs = torch.cat((obs, features), dim=-1)
         assert obs.shape == (self.num_envs, self.cfg.observation_space), obs.shape
         if self.goal_markers is not None:
             self._visualize_goals()
@@ -390,6 +421,12 @@ class DG5FCubeEnv(DirectRLEnv):
         started = self.episode_length_buf >= self.success_start_step
         in_tolerance = (self.orientation_error <= self.cfg.success_tolerance_rad) & ~self.reset_terminated
         in_tolerance &= started & self.success_eligible
+        if self.cfg.gait_task_gate:
+            in_tolerance &= self.tip_contact_count >= 3
+        if self.cfg.gait_observation_mode == "timers":
+            from .gait_features import update_timers
+            self.gait_timers = update_timers(self.gait_timers, self.gait_previous_contacts, self.tip_in_contact, self.step_dt)
+            self.gait_previous_contacts.copy_(self.tip_in_contact)
         first_success = self.success.update(in_tolerance, self.episode_length_buf)
         self.error_sum += self.orientation_error
         self.error_min = torch.minimum(self.error_min, self.orientation_error)
@@ -430,6 +467,10 @@ class DG5FCubeEnv(DirectRLEnv):
             "success_bonus": self.cfg.success_bonus * first_success.float(),
             "drop_penalty": -self.cfg.fall_penalty * self.reset_terminated.float(),
         }
+        if self.cfg.gait_task_gate:
+            supported = (self.tip_contact_count >= 3).float()
+            terms["orientation_state_reward"] *= supported
+            terms["orientation_progress_reward"] *= supported
         if self.cfg.tip_contact_reward:
             # AnyRotate (2024): reward enough fingertips on the object, not a distance proxy.
             terms["tip_contact_reward"] = self.cfg.tip_contact_reward * (
@@ -750,7 +791,17 @@ class DG5FCubeEnv(DirectRLEnv):
         # _sample_goals_for above already counted this episode's first goal, so clear before it.
         self.goals_issued[env_ids] = 1 if self.cfg.goal_stream else 0
         self.error_sum[env_ids] = 0
+        self.gait_timers[env_ids] = 0
+        self.gait_previous_contacts[env_ids] = False
         self.tip_contact_sum[env_ids] = 0
         self.steps_without_tip_contact[env_ids] = 0
         self.error_min[env_ids] = math.inf
         self.episode_returns[env_ids] = 0
+        self.gait_last_picks[env_ids] = -1
+        if self.gait_cache is not None:
+            selected = env_ids[torch.rand(count, device=self.device) < self.cfg.gait_transition_fraction]
+            if len(selected):
+                from dg5f_isaaclab.assets.gait_cache import restore
+                picks = torch.multinomial(self.gait_sample_weights, len(selected), replacement=True)
+                restore(self, self.gait_cache, picks, selected)
+                self.gait_last_picks[selected] = picks

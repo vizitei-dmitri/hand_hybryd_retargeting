@@ -711,3 +711,33 @@ class NearGoalVelocityWindowTests(unittest.TestCase):
                   / "source/dg5f_isaaclab/dg5f_isaaclab/tasks/direct/dg5f_cube/dg5f_cube_env_cfg.py"
                   ).read_text()
         self.assertIn("if self.goal_stream:\n            self.goal_velocity_window_deg = min(", source)
+
+
+class HydraOverridableDefaultsTests(unittest.TestCase):
+    """Config fields meant to be set from the command line must not default to None.
+
+    Isaac Lab's `update_class_from_dict` type-checks an override with
+    `isinstance(value, type(obj_mem))` against the attribute's CURRENT value
+    (isaaclab/utils/dict.py:149). A field sitting at None therefore rejects every string override
+    with "Expected: <class 'NoneType'>, Received: <class 'str'>", which is what aborted the H1_B
+    gait branch after its 400-iteration sibling had already finished.
+    """
+
+    CFG_SOURCE = (Path(__file__).resolve().parents[1]
+                  / "source/dg5f_isaaclab/dg5f_isaaclab/tasks/direct/dg5f_cube/dg5f_cube_env_cfg.py"
+                  ).read_text()
+
+    def test_a_gait_cache_path_is_a_string_default(self):
+        self.assertIn('gait_transition_cache_path: str = ""', self.CFG_SOURCE)
+        self.assertNotIn("gait_transition_cache_path: str | None = None", self.CFG_SOURCE)
+
+    def test_b_empty_string_still_means_disabled(self):
+        # The env gates the feature on falsiness, so "" must behave exactly like the old None.
+        env_source = (Path(__file__).resolve().parents[1]
+                      / "source/dg5f_isaaclab/dg5f_isaaclab/tasks/direct/dg5f_cube/dg5f_cube_env.py"
+                      ).read_text()
+        self.assertIn("if not cfg.gait_transition_cache_path:", env_source)
+
+    def test_c_stream_cfg_gives_grasp_cache_path_a_string(self):
+        # The same trap, already avoided for the stable cache -- keep it that way.
+        self.assertIn("grasp_cache_path = str(ROBUST_GRASP_CACHE_PATH)", self.CFG_SOURCE)
