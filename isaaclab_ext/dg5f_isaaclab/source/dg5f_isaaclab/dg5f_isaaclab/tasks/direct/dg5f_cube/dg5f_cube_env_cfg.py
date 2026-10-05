@@ -20,7 +20,7 @@ from dg5f_isaaclab.assets.object_cube import (
 from dg5f_isaaclab.assets.grasp_cache import DEFAULT_GRASP_CACHE_PATH, ROBUST_GRASP_CACHE_PATH
 from dg5f_isaaclab.assets.sysid import DEFAULT_SYSID_PATH, load_sysid
 from .control import CONTROL_MODES
-from .goals import STREAM_STAGES
+from .goals import GOAL_STAGES
 
 
 @configclass
@@ -125,7 +125,7 @@ class DG5FCubeEnvCfg(DirectRLEnvCfg):
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False, enable_gyroscopic_forces=True,
                 solver_position_iteration_count=8, solver_velocity_iteration_count=2,
-                max_depenetration_velocity=0.2,
+                max_depenetration_velocity=5.0,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.001, rest_offset=0.0),
@@ -310,6 +310,38 @@ class DG5FCubeEnvCfg(DirectRLEnvCfg):
 
     gait_task_gate: bool = False
     gait_observation_mode: str = "none"
+    # Khandate 2022 continuous-rotation term: clip(omega . k) while >= axis_velocity_min_tips
+    # fingertips hold the cube, otherwise only its negative part (rotating backwards is never
+    # free). omega is the finite-difference rate about target_axis_in_palm in the PALM frame, as
+    # HORA computes its rotation reward. Summed over an episode it pays scale / control_dt per
+    # radian: 0.5 x 60 = 30 per radian, against roughly 40 per radian for the 20 deg goal reward.
+    axis_velocity_reward_scale: float = 0.0
+    axis_velocity_clip_rad_s: float = 0.5
+    axis_velocity_min_tips: int = 3
+    # Reset the cube to the orientation STORED in the grasp cache instead of the palm-aligned
+    # identity. Every entry of the existing caches stores identity, so for them this changes nothing;
+    # it is what lets a Stable-Grasp-Sampler cache (Khandate 2022: grasps sampled with the object
+    # turned about the rotation axis) actually start the cube turned.
+    grasp_cache_orientation: bool = False
+    # Fingertip collider approximation, applied by assets/dg5f.py:spawn_dg5f and recorded in env.yaml.
+    # Stays "convexDecomposition" (every trained policy and cache uses it). A first approach test said
+    # the decomposition sat 1.2-8 mm inside the rendered tips; that was an artefact of a stale tip pose.
+    # Measured at the moment of first contact the two settings agree to <0.5 mm (0.2-0.8 mm mesh depth,
+    # 3 mm for the index tip in both): the colliders were never the cause of the visible sinking.
+    tip_collider_approximation: str = "convexDecomposition"
+    # Joint-limit margin penalty: -scale * mean over active joints of max(0, 1 - distance_to_limit /
+    # margin). At the stage-M ceiling four joints (4_1, 1_1, 5_2, 5_4) sit at their limits and the
+    # MEAN-deviation pose penalty barely changes (23.6 -> 27.8 deg), so it cannot see the ceiling;
+    # this term reads exactly the joints that cause it. HORA's gait emerges under pose constraints.
+    joint_limit_penalty_scale: float = 0.0
+    joint_limit_margin_deg: float = 10.0
+    # Event bonus for a meaningful finger relocation (goals.relocation_events): release, tip moved
+    # >= relocation_min_displacement_m over the cube (the frozen gait threshold, 10.9 mm), recontact
+    # after >= relocation_min_release_steps while >= relocation_min_support_tips other tips hold.
+    relocation_bonus: float = 0.0
+    relocation_min_release_steps: int = 4
+    relocation_min_displacement_m: float = 0.0109
+    relocation_min_support_tips: int = 2
 
     def resolve_control_config(self):
         """Apply the JSON once per config resolution and derive the policy layout."""
@@ -390,8 +422,8 @@ class DG5FCubeEnvCfg(DirectRLEnvCfg):
                 "grasp_quality_deficit_scale needs grasp_quality_scale non-zero: the quality is only "
                 "computed inside that term's branch, and the deficit penalty reads it.")
         if self.goal_stream:
-            if self.goal_stream_stage not in STREAM_STAGES:
-                raise ValueError(f"goal_stream_stage must be one of {STREAM_STAGES}")
+            if self.goal_stream_stage not in GOAL_STAGES:
+                raise ValueError(f"goal_stream_stage must be one of {GOAL_STAGES}")
             if self.goal_stream_angle_deg <= math.degrees(self.success_tolerance_rad):
                 raise ValueError("goal_stream_angle_deg must exceed the success tolerance")
             if self.goal_curriculum:

@@ -10,6 +10,10 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 # Re-exported for convenience; it lives in a module with no Isaac imports because the training
 # orchestrator has to read the thresholds without starting Kit.
 from ..curriculum import STREAM_CURRICULUM, StreamCurriculumCfg  # noqa: F401
+from .bounded_policy import register as _register_bounded_policy
+
+# Runtime registration only (a new name in the runner's namespace); RSL-RL itself is untouched.
+_register_bounded_policy()
 
 
 # Experiment B (reward v2) changes vs the first 500-it run (2026-09-16_23-16-44):
@@ -70,3 +74,33 @@ class PPOStreamRunnerCfg(PPORunnerCfg):
         # previous run drift, since the advantage signal was weak and noisy.
         self.policy.init_noise_std = 0.2
         self.algorithm.entropy_coef = 0.0
+
+
+@configclass
+class BoundedActorCriticCfg(RslRlPpoActorCriticCfg):
+    """RslRlPpoActorCriticCfg plus the rl_games bounds loss (see agents/bounded_policy.py)."""
+
+    class_name: str = "BoundedActorCritic"
+    bounds_loss_coef: float = 1.0e-3
+    bounds_soft_limit: float = 1.0
+
+
+@configclass
+class PPOStreamBoundedRunnerCfg(PPOStreamRunnerCfg):
+    """PPOStreamRunnerCfg with the bounds loss and literature exploration settings.
+
+    Every working configuration in the literature review starts from a std near 1.0 (init_noise_std
+    1.0 in Isaac Lab, sigma 0 log-std in rl_games); 0.2 is what this task used. Network, PPO and
+    normalisation settings are inherited unchanged.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.policy = BoundedActorCriticCfg(
+            init_noise_std=1.0,
+            actor_obs_normalization=self.policy.actor_obs_normalization,
+            critic_obs_normalization=self.policy.critic_obs_normalization,
+            actor_hidden_dims=list(self.policy.actor_hidden_dims),
+            critic_hidden_dims=list(self.policy.critic_hidden_dims),
+            activation=self.policy.activation,
+        )

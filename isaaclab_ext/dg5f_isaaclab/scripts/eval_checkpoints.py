@@ -33,6 +33,9 @@ parser.add_argument("--goal_angle_deg", type=float, default=None,
                          "at, or the gate measures a different task.")
 parser.add_argument("--orientation_baseline", choices=("true", "false"), default=None,
                     help="Match E4 training reward when reporting episode return")
+parser.add_argument("--episode_length_s", type=float, default=None,
+                    help="Evaluation-only episode length. A longer episode separates a rotation CEILING "
+                         "(net turn plateaus, then the cube drops) from the time limit of the 24 s episode.")
 parser.add_argument("--output", type=Path, required=True)
 parser.add_argument("--smoothing_telemetry", action="store_true", help="Collect first-episode action/reward/drop diagnostics")
 parser.add_argument("--gait_telemetry", action="store_true")
@@ -95,6 +98,10 @@ def main():
             setattr(env_cfg, key, value)
     if args_cli.orientation_baseline is not None:
         env_cfg.orientation_baseline = args_cli.orientation_baseline == "true"
+    if args_cli.episode_length_s is not None:
+        if args_cli.episode_length_s <= 0:
+            raise ValueError("episode_length_s must be positive")
+        env_cfg.episode_length_s = args_cli.episode_length_s
     if args_cli.stage is not None:
         env_cfg.goal_stream_stage = args_cli.stage
     if args_cli.goal_angle_deg is not None:
@@ -163,6 +170,8 @@ def main():
                     "goals": completed,
                     "issued": int(raw.goals_issued[i]),
                     "tips": float(raw.tip_contact_sum[i]) / steps,
+                    "axis_palm": math.degrees(raw.axis_rotation_palm[i]),
+                    "axis_body": math.degrees(raw.axis_rotation_body[i]),
                 }
         reset_idx(env_ids)
 
@@ -258,6 +267,18 @@ def main():
                 / max(1, sum(1 for v in values if v["goals"]))),
             "commanded_rotation_deg_per_episode": mean("goals") * getattr(env_cfg, "goal_stream_angle_deg", 0.0),
             "mean_tip_contacts": mean("tips"),
+            # Net signed rotation about the target axis (see env.axis_rotation_*). With stage M the
+            # goals all point one way, so goals x angle and this integral should agree; with a
+            # reversible stream they need not, and the gap is the rocking.
+            "axis_rotation_palm_deg": mean("axis_palm"),
+            "axis_rotation_body_deg": mean("axis_body"),
+            "axis_rotation_palm_abs_deg": sum(abs(v["axis_palm"]) for v in values) / n,
+            "axis_rotation_body_abs_deg": sum(abs(v["axis_body"]) for v in values) / n,
+            "axis_rotation_palm_deg_not_dropped": sum(v["axis_palm"] for v in kept) / max(1, len(kept)),
+            "goals_histogram": {str(k): sum(1 for v in values if v["goals"] == k)
+                                for k in sorted({v["goals"] for v in values})},
+            "per_episode": {key: [round(v[key], 2) if isinstance(v[key], float) else v[key] for v in values]
+                            for key in ("goals", "drop", "steps", "axis_palm", "axis_body")},
             "action_std": action_std if path is not None else None,
             "stage": getattr(env_cfg, "goal_stream_stage", None) if getattr(env_cfg, "goal_stream", False) else None,
         }
@@ -281,7 +302,9 @@ def main():
               f" max_consecutive={r['max_consecutive_goals']}"
               f" completion={r['target_completion_rate']:.3f}"
               f" s/goal={r['mean_time_per_completed_goal_s']:.2f}"
-              f" tips={r['mean_tip_contacts']:.2f}", flush=True)
+              f" tips={r['mean_tip_contacts']:.2f}"
+              f" axis_palm={r['axis_rotation_palm_deg']:+.1f}deg axis_body={r['axis_rotation_body_deg']:+.1f}deg"
+              f" goals_hist={r['goals_histogram']}", flush=True)
     args_cli.output.parent.mkdir(parents=True, exist_ok=True)
     args_cli.output.write_text(json.dumps(results, indent=2))
     print(f"[EVAL] wrote {args_cli.output}")

@@ -8,7 +8,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 from isaaclab.sim.converters import UrdfConverterCfg
-from pxr import UsdPhysics
+from pxr import PhysxSchema, Usd, UsdPhysics
 
 from .sysid import DEFAULT_SYSID_PATH, load_sysid
 
@@ -88,6 +88,27 @@ def spawn_dg5f(prim_path, cfg, translation=None, orientation=None, **kwargs):
     if cfg.collision_props is not None:
         sim_utils.modify_collision_properties(prim_path, cfg.collision_props, stage=prim.GetStage())
     stage = prim.GetStage()
+    # Fingertip colliders. The global collider_type is convex_decomposition (the concave palm needs
+    # it), but on the fingertips the decomposition came out 1.2-8.0 mm INSIDE the rendered surface
+    # (scripts/tip_collider_coverage.py), so the tips sank into the cube. The tip meshes are already
+    # convex (mesh volume == hull volume), so a convex hull reproduces them; 255 hull vertices (the
+    # PhysX maximum) keeps the rounded cap. "convexDecomposition" restores the historical colliders.
+    approximation = getattr(cfg, "tip_collider_approximation", "convexDecomposition")
+    if approximation != "convexDecomposition":
+        tips = [child for child in prim.GetChildren() if child.GetName().endswith("_tip")]
+        if len(tips) != 5:
+            raise RuntimeError(f"Expected 5 fingertip bodies, found {[t.GetName() for t in tips]}")
+        changed = 0
+        for tip in tips:
+            for collider in Usd.PrimRange(tip):
+                if collider.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.MeshCollisionAPI.Apply(collider).CreateApproximationAttr().Set(approximation)
+                    if approximation == "convexHull":
+                        PhysxSchema.PhysxConvexHullCollisionAPI.Apply(collider).CreateHullVertexLimitAttr().Set(255)
+                    changed += 1
+        if changed < 5:
+            raise RuntimeError(f"Only {changed} fingertip colliders found to set to {approximation}")
+        print(f"[DG5F] fingertip colliders ({changed}) approximation={approximation}")
     for body, other in DG5F_FILTERED_COLLISION_PAIRS:
         body_prim, other_prim = stage.GetPrimAtPath(f"{prim_path}/{body}"), stage.GetPrimAtPath(f"{prim_path}/{other}")
         if not (body_prim.IsValid() and other_prim.IsValid()):
@@ -116,7 +137,7 @@ DG5F_CFG = ArticulationCfg(
             gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0.0, damping=0.0),
         ),
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=True, max_depenetration_velocity=0.2,
+            disable_gravity=True, max_depenetration_velocity=5.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=True, solver_position_iteration_count=8,

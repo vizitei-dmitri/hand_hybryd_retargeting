@@ -30,8 +30,9 @@ from dg5f_isaaclab.assets.dg5f import (
 from .dg5f_cube_env_cfg import DG5FCubeEnvCfg
 from .control import ActionDelayQueue, position_targets
 from .goals import (
-    axis_angle_quat_axes, random_axes, sample_curriculum_goals, sample_fixed_angle_goals,
-    sample_goal_quats,
+    axis_angle_quat_axes, axis_velocity_reward, joint_limit_pressure, random_axes, relocation_events,
+    rotation_vector,
+    sample_curriculum_goals, sample_fixed_angle_goals, sample_goal_quats,
 )
 from .grasp import GraspQualityReward
 from .success import (
@@ -41,6 +42,7 @@ from .success import (
 
 
 logger = logging.getLogger(__name__)
+
 
 # Per-episode logs (1-D, possibly empty): present in EVERY step's log dict.
 EPISODE_LOG_KEYS = (
@@ -52,6 +54,9 @@ EPISODE_LOG_KEYS = (
     # Stream metrics: with a chain of goals, "success" alone no longer describes the behaviour.
     "episode_goals_issued", "episode_target_completion_rate", "episode_time_per_completed_goal_s",
     "episode_first_goal_held_success_rate", "episode_commanded_rotation_deg",
+    # Net SIGNED rotation about target_axis_in_palm, integrated from the cube's angular velocity.
+    # commanded_rotation counts goals, which a reversible (+/-) stream completes by rocking.
+    "episode_axis_rotation_palm_deg", "episode_axis_rotation_body_deg",
 )
 
 
@@ -72,11 +77,16 @@ class DG5FCubeEnv(DirectRLEnv):
         if sum(value * value for value in cfg.target_axis_in_palm) <= 0:
             raise ValueError("Target rotation axis must be nonzero")
         needs_contacts = (cfg.gait_task_gate or cfg.gait_observation_mode != "none"
+                          or cfg.axis_velocity_reward_scale or cfg.relocation_bonus
                           or cfg.tip_contact_reward or cfg.palm_contact_penalty or cfg.grasp_quality_scale
                           or cfg.grasp_deficit_scale or cfg.grasp_quality_deficit_scale
                           or cfg.max_time_without_tip_contact_s is not None)
         if needs_contacts and not cfg.enable_contact_sensors:
             raise ValueError("Contact-based reward/termination terms require enable_contact_sensors")
+        if cfg.tip_collider_approximation not in ("convexHull", "convexDecomposition"):
+            raise ValueError("tip_collider_approximation must be 'convexHull' or 'convexDecomposition'")
+        # Read by assets/dg5f.py:spawn_dg5f when the articulation spawns in _setup_scene.
+        cfg.robot_cfg.spawn.tip_collider_approximation = cfg.tip_collider_approximation
         if cfg.enable_contact_sensors:
             # Must be set before the articulation spawns in _setup_scene.
             cfg.robot_cfg.spawn.activate_contact_sensors = True
@@ -131,6 +141,9 @@ class DG5FCubeEnv(DirectRLEnv):
             cfg.cube_position_in_palm, device=self.device).expand(self.num_envs, -1).clone()
         self.goal_quat = torch.zeros((self.num_envs, 4), device=self.device)
         self.goal_quat[:, 0] = 1
+        # Optional per-env reset orientation of the cube (palm frame), set by grasp searches the
+        # same way they set cube_anchor. None keeps the configured reset.
+        self.cube_reset_quat: torch.Tensor | None = None
         self.actions = torch.zeros((self.num_envs, cfg.action_space), device=self.device)
         self.previous_actions = torch.zeros_like(self.actions)
         self.applied_actions = torch.zeros_like(self.actions)
@@ -220,6 +233,22 @@ class DG5FCubeEnv(DirectRLEnv):
             print(f"[GAIT_CACHE] sha256={self.gait_cache_sha256} n={len(phases)} fraction={cfg.gait_transition_fraction}"
                   f" phase_weights={weights.tolist()} phase_counts={counts.tolist()}")
         self.error_min = torch.full((self.num_envs,), math.inf, device=self.device)
+        axis = torch.tensor(cfg.target_axis_in_palm, dtype=torch.float32, device=self.device)
+        self.rotation_axis = axis / axis.norm()
+        self.axis_angular_velocity_palm = torch.zeros(self.num_envs, device=self.device)
+        self.axis_rotation_palm = torch.zeros(self.num_envs, device=self.device)
+        self.axis_rotation_body = torch.zeros(self.num_envs, device=self.device)
+        # Orientation at the previous control step. A freshly reset env has none yet (a transition
+        # reset may rewrite the pose after _reset_idx), so its first step only re-seeds it.
+        self.previous_cube_quat = torch.zeros((self.num_envs, 4), device=self.device)
+        self.previous_cube_quat[:, 0] = 1
+        self.rotation_tracking_fresh = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        self.relocation_previous_contact = torch.zeros((self.num_envs, 5), dtype=torch.bool, device=self.device)
+        self.relocation_release_position = torch.zeros((self.num_envs, 5, 3), device=self.device)
+        self.relocation_release_steps = torch.zeros((self.num_envs, 5), dtype=torch.long, device=self.device)
+        self.relocation_count = torch.zeros(self.num_envs, device=self.device)
+        # Own flag: rotation_tracking_fresh is already cleared by the time the relocation term runs.
+        self.relocation_fresh = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         self.initial_orientation_error = torch.zeros(self.num_envs, device=self.device)
         # A success only counts once a policy action has actually been delivered (FIFO delay).
         self.success_start_step = max(cfg.action_delay_steps) + 1
@@ -431,6 +460,23 @@ class DG5FCubeEnv(DirectRLEnv):
         self.error_sum += self.orientation_error
         self.error_min = torch.minimum(self.error_min, self.orientation_error)
         self.tip_contact_sum += self.tip_contact_count.float()
+        # Rotation about the target axis from the FINITE DIFFERENCE of orientation between control
+        # steps (as HORA computes its rotation reward), not from the sampled angular velocity: the
+        # bang-bang policies vibrate the cube, and one velocity sample per control step aliases that
+        # vibration into a drift (measured: 4.4 completed +20 deg goals read as -70 deg). The step
+        # increments are far below pi, so their sum is the exact net rotation, full turns included.
+        # Hand-centric (palm axis, as Khandate rewards it) and object-centric (body axis, as the
+        # goal stream applies its deltas: current * delta).
+        step_palm = rotation_vector(quat_mul(self.cube_quat, quat_conjugate(self.previous_cube_quat)))
+        step_body = rotation_vector(quat_mul(quat_conjugate(self.previous_cube_quat), self.cube_quat))
+        fresh = self.rotation_tracking_fresh
+        step_palm[fresh] = 0
+        step_body[fresh] = 0
+        self.axis_angular_velocity_palm = (step_palm * self.rotation_axis).sum(dim=-1) / self.step_dt
+        self.axis_rotation_palm += (step_palm * self.rotation_axis).sum(dim=-1)
+        self.axis_rotation_body += (step_body * self.rotation_axis).sum(dim=-1)
+        self.previous_cube_quat.copy_(self.cube_quat)
+        self.rotation_tracking_fresh[:] = False
         # Read before the terms: the effort penalties below use them (reward v2 penalised actions,
         # not effort, which is what the 0.4 Nm rating actually constrains).
         computed = self.hand.data.computed_torque[:, self.joint_ids].detach()
@@ -471,6 +517,29 @@ class DG5FCubeEnv(DirectRLEnv):
             supported = (self.tip_contact_count >= 3).float()
             terms["orientation_state_reward"] *= supported
             terms["orientation_progress_reward"] *= supported
+        if self.cfg.axis_velocity_reward_scale:
+            terms["axis_velocity_reward"] = self.cfg.axis_velocity_reward_scale * axis_velocity_reward(
+                self.axis_angular_velocity_palm, self.tip_contact_count,
+                self.cfg.axis_velocity_clip_rad_s, self.cfg.axis_velocity_min_tips)
+        if self.cfg.relocation_bonus:
+            tip_local = quat_apply_inverse(
+                self.cube_quat[:, None, :].expand(-1, 5, -1).reshape(-1, 4),
+                (self.tip_pos_palm - self.cube_pos[:, None, :]).reshape(-1, 3)).view(self.num_envs, 5, 3)
+            fresh = self.relocation_fresh[:, None]  # first step after a reset: no contact history yet
+            previous = torch.where(fresh, self.tip_in_contact, self.relocation_previous_contact)
+            events, self.relocation_release_position, self.relocation_release_steps = relocation_events(
+                previous, self.tip_in_contact, self.relocation_release_position, self.relocation_release_steps,
+                tip_local, self.cfg.relocation_min_release_steps, self.cfg.relocation_min_displacement_m,
+                self.cfg.relocation_min_support_tips)
+            self.relocation_previous_contact.copy_(self.tip_in_contact)
+            self.relocation_fresh[:] = False
+            count = events.sum(dim=-1).float()
+            self.relocation_count += count
+            terms["relocation_bonus"] = self.cfg.relocation_bonus * count
+        if self.cfg.joint_limit_penalty_scale:
+            q = self.hand.data.joint_pos[:, self.active_joint_ids]
+            terms["joint_limit_penalty"] = -self.cfg.joint_limit_penalty_scale * joint_limit_pressure(
+                q, self.lower, self.upper, math.radians(self.cfg.joint_limit_margin_deg))
         if self.cfg.tip_contact_reward:
             # AnyRotate (2024): reward enough fingertips on the object, not a distance proxy.
             terms["tip_contact_reward"] = self.cfg.tip_contact_reward * (
@@ -727,6 +796,8 @@ class DG5FCubeEnv(DirectRLEnv):
             # is path length along the stream, and it is the honest way to say "how much it turned".
             "episode_commanded_rotation_deg":
                 self.goals_completed[completed].float() * self.cfg.goal_stream_angle_deg,
+            "episode_axis_rotation_palm_deg": torch.rad2deg(self.axis_rotation_palm[completed]),
+            "episode_axis_rotation_body_deg": torch.rad2deg(self.axis_rotation_body[completed]),
         }
         assert set(episode_log) == set(EPISODE_LOG_KEYS)
         self.extras.setdefault("log", {}).update(episode_log)
@@ -773,6 +844,10 @@ class DG5FCubeEnv(DirectRLEnv):
             angles = sample_uniform(0.0, math.radians(self.cfg.cube_reset_orientation_noise_deg),
                                     (count,), device=self.device)
             initial_quat = axis_angle_quat_axes(angles, random_axes(count, self.device))
+        if self.grasp_cache is not None and self.cfg.grasp_cache_orientation:
+            initial_quat = self.grasp_cache["cube_quat"][picks]
+        elif self.cube_reset_quat is not None:
+            initial_quat = self.cube_reset_quat[env_ids]
         cube_state[:, :3] = self.palm_pos_w[env_ids] + quat_apply(self.palm_quat_w[env_ids], local_pos)
         cube_state[:, 3:7] = quat_mul(self.palm_quat_w[env_ids], initial_quat)
         cube_state[:, 7:] = 0
@@ -796,6 +871,12 @@ class DG5FCubeEnv(DirectRLEnv):
         self.tip_contact_sum[env_ids] = 0
         self.steps_without_tip_contact[env_ids] = 0
         self.error_min[env_ids] = math.inf
+        self.axis_rotation_palm[env_ids] = 0
+        self.axis_rotation_body[env_ids] = 0
+        self.rotation_tracking_fresh[env_ids] = True
+        self.relocation_release_steps[env_ids] = 0
+        self.relocation_fresh[env_ids] = True
+        self.relocation_count[env_ids] = 0
         self.episode_returns[env_ids] = 0
         self.gait_last_picks[env_ids] = -1
         if self.gait_cache is not None:

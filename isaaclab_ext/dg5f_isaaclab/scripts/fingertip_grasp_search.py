@@ -71,6 +71,11 @@ parser.add_argument("--open_deg", default="15,55", help="Flexion opened by this 
 parser.add_argument("--curl_deg", default="-25,12", help="Closing command offset on flexion joints")
 parser.add_argument("--abduction_deg", default="-12,12", help="Spread offset on *_1 joints")
 parser.add_argument("--thumb_deg", default="-18,18", help="Offset on rj_dg_1_1 / rj_dg_1_2")
+parser.add_argument("--cube_roll_deg", default="0,0",
+                    help="Cube turned about cfg.target_axis_in_palm by U(min,max) before closing. The "
+                         "Stable Grasp Sampler of Khandate 2022 samples the object pose ABOUT THE "
+                         "ROTATION AXIS; with 0,0 (the historical search) every grasp holds the cube "
+                         "palm-aligned, i.e. the reset distribution never contains a turned cube.")
 parser.add_argument("--output", default="logs/fingertip_grasp/cache.npz")
 parser.add_argument("--report_rejects", type=int, default=6)
 AppLauncher.add_app_launcher_args(parser)
@@ -167,7 +172,11 @@ def sample_candidates(raw, generator):
         uniform(generator, *pair(args_cli.cube_y_mm), (n,), device) / 1000,
         uniform(generator, *pair(args_cli.cube_z_mm), (n,), device) / 1000,
     ], dim=-1)
-    return state, command, anchor
+    axis = torch.tensor(cfg.target_axis_in_palm, dtype=torch.float32, device=device)
+    axis = (axis / axis.norm()).expand(n, 3)
+    roll = torch.deg2rad(uniform(generator, *pair(args_cli.cube_roll_deg), (n,), device))
+    quat = torch.cat((torch.cos(0.5 * roll)[:, None], torch.sin(0.5 * roll)[:, None] * axis), dim=-1)
+    return state, command, anchor, quat
 
 
 def close_on_cube(env, target_command, steps):
@@ -229,6 +238,9 @@ def reseat(env, target_command):
     settled_q = raw.hand.data.joint_pos[:, raw.joint_ids].clone()
     settled_q[:, raw.disabled_index] = raw.cfg.disabled_joint_position
     settled_cube = raw.cube_pos.clone()
+    # The orientation the cube actually settled at, re-used for the reset below so the hold that
+    # validates the grasp starts from it, and stored in the cache with the position.
+    settled_quat = raw.cube_quat.clone()
     cap = math.radians(args_cli.preload_deg)
     preload = (target_command - settled_q).clamp(-cap, cap) * flex
     command = torch.clamp(settled_q + preload, lower, upper)
@@ -237,8 +249,9 @@ def reseat(env, target_command):
     raw.hand.data.default_joint_pos[:, raw.joint_ids] = settled_q
     raw.grasp_command[:] = command
     raw.cube_anchor = settled_cube.clone()
+    raw.cube_reset_quat = settled_quat
     env.reset()
-    return settled_q, command, settled_cube
+    return settled_q, command, settled_cube, settled_quat
 
 
 def hold_and_score(env, steps, score_steps):
@@ -343,15 +356,16 @@ def main():
     totals = {}
     start = time.monotonic()
     for round_id in range(args_cli.rounds):
-        state, command, anchor = sample_candidates(raw, generator)
+        state, command, anchor, roll_quat = sample_candidates(raw, generator)
         raw.hand.data.default_joint_pos[:, raw.joint_ids] = state
         raw.grasp_command[:] = command
         # cfg.cube_position_in_palm is stored as an expand() view, so every row shares memory:
         # writing per-env anchors in place raises. Replace the tensor instead.
         raw.cube_anchor = anchor.clone()
+        raw.cube_reset_quat = roll_quat
         env.reset()
         frozen = close_on_cube(env, command, close_steps)
-        settled_q, settled_command, settled_cube = reseat(env, command)
+        settled_q, settled_command, settled_cube, settled_quat = reseat(env, command)
         metrics = hold_and_score(env, hold_steps, score_steps)
         good = accept(metrics)
         for name, mask in reject_reasons(metrics).items():
@@ -359,12 +373,10 @@ def main():
         ids = good.nonzero(as_tuple=False).squeeze(-1)
         if ids.numel():
             # Exactly the state that reseat() reset to and hold_and_score() then validated.
-            identity = torch.zeros((ids.numel(), 4), device=raw.device)
-            identity[:, 0] = 1
             kept["q"].append(settled_q[ids].cpu().numpy())
             kept["q_cmd"].append(settled_command[ids].cpu().numpy())
             kept["cube_pos"].append(settled_cube[ids].cpu().numpy())
-            kept["cube_quat"].append(identity.cpu().numpy())
+            kept["cube_quat"].append(settled_quat[ids].cpu().numpy())
             kept["anchor"].append(anchor[ids].cpu().numpy())
         print(f"[SEARCH] round={round_id} closed_fingers={frozen.sum(dim=-1).float().mean():.2f}"
               f" accepted={ids.numel()}/{raw.num_envs}"

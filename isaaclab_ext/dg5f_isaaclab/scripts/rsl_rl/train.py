@@ -51,6 +51,12 @@ parser.add_argument("--verify_reset_config", type=str, default=None,
 parser.add_argument("--expected_resume_checkpoint", type=str, default=None)
 parser.add_argument("--expected_actor_fingerprint", type=str, default=None)
 parser.add_argument("--verify_hypothesis_config", type=str, default=None)
+parser.add_argument("--reset_action_std", type=float, default=None,
+                    help="Set the policy's exploration std after loading (and after resume verification). "
+                         "For the bounds-loss arm: a mean pulled back into [-1, 1] under the inherited "
+                         "std ~5.5 would make every rollout action a coin flip at +-1.")
+parser.add_argument("--verify_task_config", type=str, default=None,
+                    help="JSON of explicitly approved task changes (goal stage, rotation reward)")
 parser.add_argument("--checkpoint_offsets", type=str, default="",
                     help="Extra checkpoint offsets after this resume, e.g. 100,300,400")
 parser.add_argument("--verify_fixed_lr", type=float, default=None,
@@ -260,9 +266,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         import json
         reset_overrides = json.load(open(args_cli.verify_reset_config)) if args_cli.verify_reset_config else None
         hypothesis_overrides = json.load(open(args_cli.verify_hypothesis_config)) if args_cli.verify_hypothesis_config else None
-        verified = verify_resume_start(runner, resume_path, log_dir, agent_cfg.algorithm.entropy_coef, overrides, reset_overrides, hypothesis_overrides)
+        task_overrides = json.load(open(args_cli.verify_task_config)) if args_cli.verify_task_config else None
+        verified = verify_resume_start(runner, resume_path, log_dir, agent_cfg.algorithm.entropy_coef, overrides, reset_overrides, hypothesis_overrides, task_overrides)
         if args_cli.expected_actor_fingerprint and verified["actor_output_fingerprint"] != args_cli.expected_actor_fingerprint:
             raise RuntimeError("Deterministic actor fingerprint differs BEFORE optimization")
+    if args_cli.reset_action_std is not None:
+        import math
+        if args_cli.reset_action_std <= 0:
+            raise ValueError("reset_action_std must be positive")
+        policy = runner.alg.policy
+        before = float(policy.std.mean()) if policy.noise_std_type == "scalar" else float(policy.log_std.exp().mean())
+        with torch.no_grad():
+            if policy.noise_std_type == "scalar":
+                policy.std.fill_(args_cli.reset_action_std)
+            else:
+                policy.log_std.fill_(math.log(args_cli.reset_action_std))
+        print(f"[STD_RESET] action std {before:.4f} -> {args_cli.reset_action_std:.4f} (after verification)", flush=True)
     if args_cli.verify_fixed_lr is not None:
         expected_lr = args_cli.verify_fixed_lr
         def check_fixed_lr():

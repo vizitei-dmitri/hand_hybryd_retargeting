@@ -459,6 +459,96 @@ class GoalStreamTests(unittest.TestCase):
         torch.testing.assert_close(alignment.abs(), torch.ones(1024), atol=1e-4, rtol=0)
         self.assertTrue(bool((alignment > 0).any()) and bool((alignment < 0).any()), "sign is not random")
 
+    def test_d2_stage_m_is_stage_a_with_the_sign_fixed_positive(self):
+        reference = self.references(1024, seed=4)
+        goal = goals.sample_fixed_angle_goals(reference, self.ANGLE, "M", self.AXIS)
+        axis, angle = self.delta_axis_angle(reference, goal)
+        torch.testing.assert_close(angle, torch.full((1024,), self.ANGLE), atol=1e-5, rtol=0)
+        alignment = (axis * torch.tensor(self.AXIS)).sum(dim=-1)
+        torch.testing.assert_close(alignment, torch.ones(1024), atol=1e-4, rtol=0)
+
+    def test_d3_stage_m_chains_into_one_monotonic_turn(self):
+        # 18 goals of 20 deg about the body axis must compose into one full revolution: the goals
+        # accumulate instead of cancelling, which is the whole difference from stage A.
+        quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+        for _ in range(9):
+            quat = goals.sample_fixed_angle_goals(quat, self.ANGLE, "M", self.AXIS)
+        torch.testing.assert_close(quat.abs(), torch.tensor([[0.0, 1.0, 0.0, 0.0]]), atol=1e-5, rtol=0)
+
+    def test_d4_stage_m_is_accepted_but_not_part_of_the_curriculum(self):
+        # train_stream.py advances along STREAM_STAGES; M must not become "the stage after C".
+        self.assertIn("M", goals.GOAL_STAGES)
+        self.assertNotIn("M", goals.STREAM_STAGES)
+        self.assertEqual(goals.GOAL_STAGES[:len(goals.STREAM_STAGES)], goals.STREAM_STAGES)
+
+    def test_d5_summed_rotation_increments_give_the_exact_net_turn(self):
+        # How env.axis_rotation_* is measured: a full revolution in 1 deg steps, with the quaternion
+        # sign flipped on alternate steps (PhysX may return either), must sum to exactly 360 deg,
+        # and a rocking +20/-20 path must sum to zero however long it is.
+        axis = torch.tensor([[1.0, 0.0, 0.0]])
+        def turn(deg):
+            return goals.axis_angle_quat_axes(torch.tensor([math.radians(deg)]), axis)
+        previous, total = turn(0.0), 0.0
+        for step in range(1, 361):
+            current = turn(float(step)) * (-1.0 if step % 2 else 1.0)
+            increment = goals.rotation_vector(goals.quat_multiply(
+                current, previous * torch.tensor([1.0, -1.0, -1.0, -1.0])))
+            total += float((increment * axis).sum())
+            previous = current
+        self.assertAlmostEqual(math.degrees(total), 360.0, places=3)
+        previous, total = turn(0.0), 0.0
+        for step in range(200):
+            current = turn(20.0 * math.sin(0.3 * step))
+            increment = goals.rotation_vector(goals.quat_multiply(
+                current, previous * torch.tensor([1.0, -1.0, -1.0, -1.0])))
+            total += float((increment * axis).sum())
+            previous = current
+        self.assertAlmostEqual(math.degrees(total), 20.0 * math.sin(0.3 * 199), places=3)
+        torch.testing.assert_close(goals.rotation_vector(turn(0.0)), torch.zeros(1, 3))
+
+    def test_d6_axis_velocity_reward_pays_only_held_forward_rotation(self):
+        rate = torch.tensor([0.3, 0.3, -0.3, -0.3, 2.0, -2.0])
+        tips = torch.tensor([3, 2, 3, 1, 4, 0])
+        reward = goals.axis_velocity_reward(rate, tips, 0.5, 3)
+        torch.testing.assert_close(reward, torch.tensor([0.3, 0.0, -0.3, -0.3, 0.5, -0.5]))
+
+    def test_d7_joint_limit_pressure_reads_only_joints_near_a_limit(self):
+        lower, upper = torch.zeros(1, 4), torch.ones(1, 4)
+        margin = 0.1
+        q = torch.tensor([[0.5, 0.0, 0.95, 1.0]])  # mid, at lower, half the margin from upper, at upper
+        torch.testing.assert_close(goals.joint_limit_pressure(q, lower, upper, margin),
+                                   torch.tensor([(0.0 + 1.0 + 0.5 + 1.0) / 4]))
+
+    def test_d8_relocation_event_needs_release_time_displacement_and_support(self):
+        n = 1
+        def step(prev, cont, pos, steps, tips):
+            return goals.relocation_events(torch.tensor([prev]), torch.tensor([cont]), pos, steps,
+                                           torch.tensor([tips]), 4, 0.0109, 2)
+        pos, steps = torch.zeros(n, 5, 3), torch.zeros(n, 5, dtype=torch.long)
+        on = [True, True, True, False, False]
+        off0 = [False, True, True, False, False]
+        tips = [[0.0, 0.0, 0.035]] * 5
+        moved = [[0.02, 0.0, 0.035]] + [[0.0, 0.0, 0.035]] * 4
+        ev, pos, steps = step(on, off0, pos, steps, tips)  # finger 0 releases at (0, 0, 0.035)
+        self.assertFalse(bool(ev.any()))
+        for _ in range(4):
+            ev, pos, steps = step(off0, off0, pos, steps, moved)
+        ev, pos, steps = step(off0, on, pos, steps, moved)  # back after 5 steps, 20 mm away, 2 others hold
+        self.assertEqual(ev[0].tolist(), [True, False, False, False, False])
+        # Same displacement but only 1 other tip holding: no event.
+        pos, steps = torch.zeros(n, 5, 3), torch.zeros(n, 5, dtype=torch.long)
+        weak_on, weak_off = [True, True, False, False, False], [False, True, False, False, False]
+        ev, pos, steps = step(weak_on, weak_off, pos, steps, tips)
+        for _ in range(4):
+            ev, pos, steps = step(weak_off, weak_off, pos, steps, moved)
+        ev, pos, steps = step(weak_off, weak_on, pos, steps, moved)
+        self.assertFalse(bool(ev.any()))
+        # Jitter: back after 1 step, or back to the same spot: no event.
+        pos, steps = torch.zeros(n, 5, 3), torch.zeros(n, 5, dtype=torch.long)
+        ev, pos, steps = step(on, off0, pos, steps, tips)
+        ev, pos, steps = step(off0, on, pos, steps, moved)
+        self.assertFalse(bool(ev.any()))
+
     def test_e_stage_b_uses_the_three_principal_axes(self):
         reference = self.references(3072, seed=5)
         goal = goals.sample_fixed_angle_goals(reference, self.ANGLE, "B", self.AXIS)

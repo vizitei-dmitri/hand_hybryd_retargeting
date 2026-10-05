@@ -125,6 +125,13 @@ def sample_curriculum_goals(current_quats: torch.Tensor, min_error_rad: float, l
 
 
 STREAM_STAGES = ("A", "B", "C")
+# Every stage the generator accepts. NOT the curriculum order: scripts/train_stream.py walks
+# STREAM_STAGES as A -> B -> C, so a stage outside that progression must not be appended to it.
+# "M" is stage A without the random sign, i.e. a MONOTONIC stream about the primary axis. With a
+# random sign the policy can complete goals by rocking +20/-20/+20 inside one grasp; a monotonic
+# stream cannot be followed past the in-grasp rotation range without relocating fingers, which is
+# what makes the continuous-rotation tasks of Khandate 2022 / AnyRotate demand finger gaiting.
+GOAL_STAGES = STREAM_STAGES + ("M",)
 
 
 def stage_axes(stage: str, count: int, device, primary_axis, generator=None) -> torch.Tensor:
@@ -134,7 +141,7 @@ def stage_axes(stage: str, count: int, device, primary_axis, generator=None) -> 
     axes, C a uniformly sampled direction. The angle is fixed by the caller: this curriculum grows
     directional complexity only, so a goal never becomes a large single-step orientation jump.
     """
-    if stage == "A":
+    if stage in ("A", "M"):
         axis = torch.as_tensor(primary_axis, dtype=torch.float32, device=device)
         return (axis / axis.norm()).expand(count, 3).clone()
     if stage == "B":
@@ -142,7 +149,7 @@ def stage_axes(stage: str, count: int, device, primary_axis, generator=None) -> 
         return torch.eye(3, device=device)[pick]
     if stage == "C":
         return random_axes(count, device, generator)
-    raise ValueError(f"Unknown stream stage {stage!r}, expected one of {STREAM_STAGES}")
+    raise ValueError(f"Unknown stream stage {stage!r}, expected one of {GOAL_STAGES}")
 
 
 def sample_fixed_angle_goals(current_quats: torch.Tensor, angle_rad: float, stage: str, primary_axis,
@@ -155,6 +162,7 @@ def sample_fixed_angle_goals(current_quats: torch.Tensor, angle_rad: float, stag
 
     Stages A and B draw a random sign, which makes the stream reversible instead of a monotonic
     drift in one direction. Stage C needs no sign because the axis itself is already two-sided.
+    Stage M keeps the positive sign on every goal: the monotonic drift, on purpose.
     """
     count, device = current_quats.shape[0], current_quats.device
     axes = stage_axes(stage, count, device, primary_axis, generator)
@@ -181,3 +189,50 @@ def quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
         w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
         w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
     ), dim=-1)
+
+
+def rotation_vector(quat: torch.Tensor) -> torch.Tensor:
+    """Axis * angle of a (w, x, y, z) rotation, angle in [0, pi] (q and -q give the same vector)."""
+    quat = torch.where(quat[:, :1] < 0, -quat, quat)
+    vector = quat[:, 1:]
+    sin_half = torch.linalg.vector_norm(vector, dim=-1, keepdim=True)
+    angle = 2.0 * torch.atan2(sin_half, quat[:, :1])
+    # angle / sin(angle/2) -> 2 as the rotation vanishes; the clamp only guards the division.
+    return vector * torch.where(sin_half > 1e-7, angle / sin_half.clamp_min(1e-12), torch.full_like(angle, 2.0))
+
+
+def axis_velocity_reward(axis_velocity: torch.Tensor, tip_count: torch.Tensor, clip: float,
+                         min_tips: int) -> torch.Tensor:
+    """Khandate 2022, eq. 2: clipped rotation rate when held by >= min_tips fingertips, else only
+    its negative part, so a weak grasp can lose reward by turning backwards but never earn it."""
+    rate = axis_velocity.clamp(-clip, clip)
+    return torch.where(tip_count >= min_tips, rate, rate.clamp_max(0.0))
+
+
+def joint_limit_pressure(q: torch.Tensor, lower: torch.Tensor, upper: torch.Tensor, margin: float) -> torch.Tensor:
+    """Mean over joints of max(0, 1 - distance_to_nearest_limit / margin): 0 well inside, 1 at a limit."""
+    distance = torch.minimum(q - lower, upper - q)
+    return (1.0 - distance / margin).clamp(0.0, 1.0).mean(dim=-1)
+
+
+def relocation_events(previous_contact: torch.Tensor, contact: torch.Tensor, release_position: torch.Tensor,
+                      release_steps: torch.Tensor, tip_local: torch.Tensor, min_release_steps: int,
+                      min_displacement: float, min_support_tips: int):
+    """Per-finger 'meaningful relocation' events, one control step at a time.
+
+    A finger that leaves the cube stores where its tip was (cube frame) and counts the steps it stays
+    off. When it touches again after at least min_release_steps, the event fires if the tip moved at
+    least min_displacement over the cube and min_support_tips OTHER tips are on the cube at that moment.
+    Shapes: contact (n, 5) bool, tip_local (n, 5, 3). Returns (events (n, 5) bool, release_position,
+    release_steps); the caller keeps the two buffers.
+    """
+    released_now = previous_contact & ~contact
+    release_position = torch.where(released_now[..., None], tip_local, release_position)
+    off = ~contact
+    release_steps = torch.where(off, release_steps + 1, release_steps)
+    recontact = ~previous_contact & contact
+    moved = (tip_local - release_position).norm(dim=-1)
+    others = contact.sum(dim=-1, keepdim=True) - contact.long()
+    events = recontact & (release_steps >= min_release_steps) & (moved >= min_displacement) & (others >= min_support_tips)
+    release_steps = torch.where(contact, torch.zeros_like(release_steps), release_steps)
+    return events, release_position, release_steps

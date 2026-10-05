@@ -54,7 +54,7 @@ def actor_fingerprint(policy):
         torch.backends.cudnn.allow_tf32 = cudnn_tf32
 
 
-def verify_resume_start(runner, checkpoint_path, log_dir, entropy, reward_overrides=None, reset_overrides=None, hypothesis_overrides=None):
+def verify_resume_start(runner, checkpoint_path, log_dir, entropy, reward_overrides=None, reset_overrides=None, hypothesis_overrides=None, task_overrides=None):
     source = Path(checkpoint_path).resolve()
     destination = Path(log_dir)
     saved = torch.load(source, map_location="cpu", weights_only=False)
@@ -77,14 +77,21 @@ def verify_resume_start(runner, checkpoint_path, log_dir, entropy, reward_overri
         configs.append(value)
     # These opt-in fields did not exist in older checkpoints; absent means disabled/default.
     defaults = {"gait_task_gate": False, "gait_observation_mode": "none", "track_gait_contact_points": False, "gait_transition_cache_path": None,
-                "gait_transition_fraction": 0.0, "gait_phase_weights": [0.0,.125,.125,.35,.25,.15,0.0]}
+                "gait_transition_fraction": 0.0, "gait_phase_weights": [0.0,.125,.125,.35,.25,.15,0.0],
+                "axis_velocity_reward_scale": 0.0, "axis_velocity_clip_rad_s": 0.5, "axis_velocity_min_tips": 3,
+                "grasp_cache_orientation": False, "joint_limit_penalty_scale": 0.0, "joint_limit_margin_deg": 10.0,
+                "relocation_bonus": 0.0, "relocation_min_release_steps": 4, "relocation_min_displacement_m": 0.0109,
+                "relocation_min_support_tips": 2,
+                # Absent in every env.yaml before 2026-10-05: those runs used the decomposition.
+                "tip_collider_approximation": "convexDecomposition"}
     serialized_defaults = yaml.load(yaml.safe_dump(defaults), Loader=yaml.BaseLoader)
     for config in configs:
         for key, value in serialized_defaults.items():
             config.setdefault(key, value)
     reset_changes = {}
     for key, value in (reset_overrides or {}).items():
-        if key not in ("gait_transition_cache_path", "gait_transition_fraction", "gait_phase_weights"):
+        if key not in ("gait_transition_cache_path", "gait_transition_fraction", "gait_phase_weights",
+                       "grasp_cache_path", "grasp_cache_orientation"):
             raise ValueError(f"Unapproved reset override: {key}")
         expected = yaml.load(yaml.safe_dump({key: value}), Loader=yaml.BaseLoader)[key]
         assert_same_state(expected, configs[1][key], f"reset_override/{key}")
@@ -97,6 +104,18 @@ def verify_resume_start(runner, checkpoint_path, log_dir, entropy, reward_overri
         expected = yaml.load(yaml.safe_dump({key: value}), Loader=yaml.BaseLoader)[key]
         assert_same_state(expected, configs[1][key], f"hypothesis_override/{key}")
         hypothesis_changes[key] = {"source": configs[0][key], "actual": configs[1][key]}
+        configs[0][key] = configs[1][key]
+    # The continuous-rotation experiments change WHAT is asked (goal direction, rotation reward),
+    # never physics or control; each such key must be named explicitly and must match exactly.
+    task_changes = {}
+    for key, value in (task_overrides or {}).items():
+        if key not in ("goal_stream_stage", "axis_velocity_reward_scale", "axis_velocity_clip_rad_s",
+                       "axis_velocity_min_tips", "joint_limit_penalty_scale", "joint_limit_margin_deg",
+                       "relocation_bonus"):
+            raise ValueError(f"Unapproved task override: {key}")
+        expected = yaml.load(yaml.safe_dump({key: value}), Loader=yaml.BaseLoader)[key]
+        assert_same_state(expected, configs[1][key], f"task_override/{key}")
+        task_changes[key] = {"source": configs[0][key], "actual": configs[1][key]}
         configs[0][key] = configs[1][key]
     changes = {}
     for key, value in (reward_overrides or {}).items():
@@ -116,8 +135,8 @@ def verify_resume_start(runner, checkpoint_path, log_dir, entropy, reward_overri
     result = {
         "actor_parameters_sha256": actor_hash.hexdigest(), "checkpoint": str(source), "checkpoint_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "all_model_tensors_exact": True, "critic_preserved": True, "normalizers_preserved": True,
-        "optimizer_exact": True, "environment_and_reward_exact_except_log_dir": not any(v["source"] != v["actual"] for group in (changes, reset_changes, hypothesis_changes) for v in group.values()),
-        "verified_hypothesis_overrides": hypothesis_changes, "verified_reset_overrides": reset_changes, "actor_output_fingerprint": actor_fingerprint(runner.alg.policy),
+        "optimizer_exact": True, "environment_and_reward_exact_except_log_dir": not any(v["source"] != v["actual"] for group in (changes, reset_changes, hypothesis_changes, task_changes) for v in group.values()),
+        "verified_hypothesis_overrides": hypothesis_changes, "verified_task_overrides": task_changes, "verified_reset_overrides": reset_changes, "actor_output_fingerprint": actor_fingerprint(runner.alg.policy),
         "verified_reward_overrides": changes, "all_other_environment_parameters_exact": True,
         "goal_stream_stage": configs[1].get("goal_stream_stage"),
         "goal_curriculum": configs[1].get("goal_curriculum"),
