@@ -53,3 +53,9 @@ Pinned versions are in `docker/python-requirements.txt`, including
 `lerobot==0.4.4`, `dex-retargeting==0.5.0`, `mujoco==3.3.7`, `pin==3.4.0`
 and `numpy==2.2.6`. They are downloaded during the Docker build and their own
 licenses apply.
+
+## UR10e + DG5F MuJoCo model
+
+`models/ur10e_dg5f/` is copied from https://github.com/VAlikV/tesollo_dg5f_mujoco
+(commit 783b992, used with the author's permission). The DG5F meshes come from
+tesollo/delto_m_ros2 (BSD-3-Clause); the UR10e model follows mujoco_menagerie.
