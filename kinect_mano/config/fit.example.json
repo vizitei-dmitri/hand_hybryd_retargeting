@@ -1,0 +1,21 @@
+{
+  "mode": "temporal",
+  "iterations": 80,
+  "learning_rate": 0.015,
+  "joint_weight": 1.0,
+  "surface_weight": 1.0,
+  "pose_weight": 0.0002,
+  "anatomy_weight": 0.005,
+  "shape_weight": 0.0001,
+  "temporal_weight": 0.02,
+  "acceleration_weight": 0.002,
+  "joint_scale_m": 0.01,
+  "surface_scale_m": 0.005,
+  "correspondence_distance_m": 0.04,
+  "correspondence_every": 3,
+  "max_points_per_camera": 2048,
+  "max_gap_s": 0.25,
+  "max_joint_residual_m": 0.04,
+  "min_valid_joints": 6,
+  "patience": 25
+}

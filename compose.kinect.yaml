@@ -1,0 +1,74 @@
+name: kinect-mano
+
+x-ros-common: &ros-common
+  image: kinect-mano-ros:humble
+  build:
+    context: .
+    dockerfile: docker/kinect-mano.Dockerfile
+    target: ros
+    args:
+      ROS_BASE_IMAGE: ${KINECT_ROS_BASE_IMAGE:-dg5f-lerobot-retargeting:humble}
+  network_mode: host
+  ipc: host
+  environment:
+    ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+    ROS_LOCALHOST_ONLY: "1"
+    RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+    DISPLAY: ${DISPLAY:-:0}
+    QT_X11_NO_MITSHM: "1"
+    MUJOCO_GL: egl
+  volumes:
+    - ${KINECT_MANO_DATA_DIR:-./kinect_mano_data}:/data:ro
+    - /tmp/.X11-unix:/tmp/.X11-unix:ro
+  init: true
+
+services:
+  kinect_core:
+    profiles: [core]
+    image: kinect-mano-core:cpu
+    build:
+      context: .
+      dockerfile: docker/kinect-mano.Dockerfile
+      target: core
+    volumes:
+      - ${KINECT_MANO_DATA_DIR:-./kinect_mano_data}:/data
+      - ${MANO_MODEL_DIR:-./models/mano}:/models/mano:ro
+    working_dir: /data
+    init: true
+    command: ["--help"]
+
+  kinect_ros:
+    <<: *ros-common
+    profiles: [ros]
+    command:
+      - ros2
+      - launch
+      - kinect_mano_ros
+      - kinect_mano.launch.py
+      - reconstruction:=/data/${KINECT_RECONSTRUCTION:-reconstruction.npz}
+      - mode:=${KINECT_ROS_MODE:-replay}
+      - live_jsonl:=${KINECT_LIVE_JSONL:-}
+      - max_live_age_s:=${KINECT_MAX_LIVE_AGE_S:-0.35}
+      - source_axes:=${KINECT_SOURCE_AXES:-optical}
+      - publish_cloud:=${KINECT_PUBLISH_CLOUD:-false}
+      - start_rviz:=${KINECT_START_RVIZ:-false}
+
+  kinect_sim:
+    <<: *ros-common
+    profiles: [sim]
+    command:
+      - ros2
+      - launch
+      - kinect_mano_ros
+      - hand_source.launch.py
+      - source:=${HAND_SOURCE:-kinect}
+      - reconstruction:=/data/${KINECT_RECONSTRUCTION:-reconstruction.npz}
+      - mode:=${KINECT_ROS_MODE:-replay}
+      - live_jsonl:=${KINECT_LIVE_JSONL:-}
+      - max_live_age_s:=${KINECT_MAX_LIVE_AGE_S:-0.35}
+      - source_axes:=${KINECT_SOURCE_AXES:-optical}
+      - publish_cloud:=${KINECT_PUBLISH_CLOUD:-false}
+      - start_rviz:=${KINECT_START_RVIZ:-false}
+      - start_lerobot:=false
+      - lerobot_backend:=mock
+      - mujoco_viewer:=false

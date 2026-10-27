@@ -1,0 +1,96 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 32; 34; 38
+    Fixed Frame: kinect_mano_world
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Ground
+      Enabled: true
+      Cell Size: 0.1
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+    - Class: rviz_default_plugins/MarkerArray
+      Name: MANO mesh, skeleton and joints
+      Enabled: true
+      Topic:
+        Value: /kinect_mano/markers
+        Depth: 1
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+      Namespaces:
+        mano: true
+    - Class: rviz_default_plugins/PoseArray
+      Name: Joint positions
+      Enabled: false
+      Topic:
+        Value: /kinect_mano/landmarks
+        Depth: 1
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+      Shape: Axes
+      Axes Length: 0.01
+      Axes Radius: 0.001
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Camera A observed cloud
+      Enabled: true
+      Topic:
+        Value: /kinect_mano/cloud_A
+        Depth: 1
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+      Style: Points
+      Size (Pixels): 3
+      Position Transformer: XYZ
+      Color Transformer: FlatColor
+      Color: 255; 140; 60
+      Decay Time: 0
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Camera B observed cloud
+      Enabled: true
+      Topic:
+        Value: /kinect_mano/cloud_B
+        Depth: 1
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+      Style: Points
+      Size (Pixels): 3
+      Position Transformer: XYZ
+      Color Transformer: FlatColor
+      Color: 80; 190; 255
+      Decay Time: 0
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Observed cloud (optional)
+      Enabled: false
+      Topic:
+        Value: /kinect_mano/cloud
+        Depth: 1
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+      Style: Points
+      Size (Pixels): 3
+      Position Transformer: XYZ
+      Color Transformer: FlatColor
+      Color: 180; 220; 180
+      Decay Time: 0
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 1.2
+      Pitch: 0.35
+      Yaw: 2.5
+      Focal Point:
+        X: 0.5
+        Y: 0
+        Z: 0
+Window Geometry:
+  Width: 1280
+  Height: 800

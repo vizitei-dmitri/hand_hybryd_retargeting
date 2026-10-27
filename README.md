@@ -6,6 +6,9 @@ human hand tracking, human-to-robot retargeting, teleoperation, learning from
 demonstrations, reinforcement learning and simulation, with the aim of treating
 them as parts of one problem rather than as separate demos.
 
+Для реконструкции MANO по двум Kinect см. [инструкцию](kinect_mano/README.md)
+и [отчёт о проверках](kinect_mano/REPORT.md).
+
 ## Overview
 
 The central question is how manipulation skill can move between a human hand, a

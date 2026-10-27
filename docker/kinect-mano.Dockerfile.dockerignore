@@ -1,0 +1,18 @@
+# Allow only the inputs consumed by the core/test/ROS targets.
+**
+!kinect_mano/
+!kinect_mano/pyproject.toml
+!kinect_mano/kinect_mano/
+!kinect_mano/kinect_mano/**
+!kinect_mano/config/
+!kinect_mano/config/**
+!kinect_mano/tests/
+!kinect_mano/tests/**
+!src/
+!src/**
+!models/
+!models/**
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/*.egg-info

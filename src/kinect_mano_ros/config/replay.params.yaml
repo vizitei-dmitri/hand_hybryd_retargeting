@@ -1,0 +1,14 @@
+/**:
+  ros__parameters:
+    mode: replay
+    reconstruction: ""
+    quality_json: ""
+    source_axes: optical
+    frame_id: kinect_mano_world
+    speed: 1.0
+    loop: false
+    poll_hz: 200.0
+    publish_cloud: false
+    marker_lifetime_s: 0.5
+    live_jsonl: ""
+    max_live_age_s: 0.35
