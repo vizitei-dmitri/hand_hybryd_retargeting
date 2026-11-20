@@ -1,0 +1,32 @@
+{
+  "result": {
+    "diagramError": null,
+    "diagrams": 1,
+    "images": [
+      {
+        "url": "docs/assets/demos/hybrid-retargeting.gif",
+        "loaded": true
+      },
+      {
+        "url": "docs/assets/demos/hand-object-reconstruction.gif",
+        "loaded": true
+      },
+      {
+        "url": "docs/assets/demos/mesh-retargeting.gif",
+        "loaded": true
+      }
+    ],
+    "diagramBox": {
+      "x": 215,
+      "y": 255.609375,
+      "width": 850,
+      "height": 233.40625,
+      "top": 255.609375,
+      "right": 1065,
+      "bottom": 489.015625,
+      "left": 215
+    },
+    "overflow": false
+  },
+  "errors": []
+}

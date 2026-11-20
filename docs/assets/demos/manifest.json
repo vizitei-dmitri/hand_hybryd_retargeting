@@ -1,0 +1,232 @@
+{
+  "date": "2026-11-20",
+  "repository": "git@github.com:vizitei-dmitri/hand_hybryd_retargeting.git",
+  "git_head_before_readme_change": "60f1e8ca578881e302a870618536c8f43d1a4071",
+  "readme_before_sha256": "1e2907f54be0f550b287643bda8736346fc5607f5138269033b72b652494fabe",
+  "sources": {
+    "hybrid_targets": {
+      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/debug_runs/acceleration_validation/retarget_after.npy",
+      "sha256": "477432e3486a24b148501ea829e011506c091b9b41a4eb02227a60342e4edf50",
+      "bytes": 83968
+    },
+    "hybrid_landmarks": {
+      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/debug_runs/2026-09-28_18-30-01_157769/landmarks.jsonl",
+      "sha256": "eab693f9d16ba977138cc0721b2adcf55263225189bcd5e6cafe3ed850f3076a",
+      "bytes": 7731396
+    },
+    "hybrid_model": {
+      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/models/dg5f/dg5f_right.xml",
+      "sha256": "5b765c5276fdbccbba3e9ea145db2da2d6bedb68b9ea3e61056120e3ec07d253",
+      "bytes": 29744
+    },
+    "viki_video": {
+      "path": "/home/yoba/Videos/Screencasts/Screencast from 11-14-2026 03:29:47 PM.webm",
+      "sha256": "b63fedbd1cefa68bf16f08efb5fcdef800189f84f77e47846fb51f7782d4e1f6",
+      "bytes": 89130460
+    },
+    "dexumr_video": {
+      "path": "/home/yoba/Documents/work/DexUMR/output/feature/video/viki_compare.mp4",
+      "sha256": "f1320f5bcf1eb1879ebb2a0fa051bafcb0bb29d7fcf644f846271df71bfbfdae",
+      "bytes": 1836282
+    }
+  },
+  "assets": {
+    "hand-object-poster.jpg": {
+      "path": "docs/assets/demos/hand-object-poster.jpg",
+      "sha256": "d38fd26de3e767abd8dbb3c806590f7a398fceb62e58007e334124dd880a9c2a",
+      "bytes": 47169
+    },
+    "hand-object-reconstruction.gif": {
+      "path": "docs/assets/demos/hand-object-reconstruction.gif",
+      "sha256": "9f7bce72aa2557d5ecbd745f0fefc6587f4114008236efbc01ea35459a458b3e",
+      "bytes": 4884078,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "gif",
+            "width": 400,
+            "height": 400,
+            "r_frame_rate": "8/1"
+          }
+        ],
+        "format": {
+          "duration": "9.010000"
+        }
+      }
+    },
+    "hand-object-reconstruction.mp4": {
+      "path": "docs/assets/demos/hand-object-reconstruction.mp4",
+      "sha256": "787ff46fd21dd2398d38ae9a03dd4c0d043fa383c7bd902b95b22a7539e77e7d",
+      "bytes": 5099615,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 640,
+            "height": 640,
+            "r_frame_rate": "24/1"
+          }
+        ],
+        "format": {
+          "duration": "9.000000"
+        }
+      }
+    },
+    "hybrid-poster.jpg": {
+      "path": "docs/assets/demos/hybrid-poster.jpg",
+      "sha256": "989bb973ec6e5060bdd0f228d0e17a9c00f6e89c1cc766e1602b906475f40203",
+      "bytes": 21576
+    },
+    "hybrid-retargeting.gif": {
+      "path": "docs/assets/demos/hybrid-retargeting.gif",
+      "sha256": "3f587e86315e8e03bf71fe72475742d468b09663aabcd36549a07beb6b97795e",
+      "bytes": 1268028,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "gif",
+            "width": 768,
+            "height": 446,
+            "r_frame_rate": "15/1"
+          }
+        ],
+        "format": {
+          "duration": "3.990000"
+        }
+      }
+    },
+    "hybrid-retargeting.mp4": {
+      "path": "docs/assets/demos/hybrid-retargeting.mp4",
+      "sha256": "2cfc82a784c8acb9eca0d49917d0881a80fc9e46f004144481d10f5ae95b4ee8",
+      "bytes": 221555,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 896,
+            "height": 520,
+            "r_frame_rate": "30/1"
+          }
+        ],
+        "format": {
+          "duration": "4.000000"
+        }
+      }
+    },
+    "mesh-retargeting-physics.mp4": {
+      "path": "docs/assets/demos/mesh-retargeting-physics.mp4",
+      "sha256": "f1320f5bcf1eb1879ebb2a0fa051bafcb0bb29d7fcf644f846271df71bfbfdae",
+      "bytes": 1836282,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 960,
+            "height": 960,
+            "r_frame_rate": "15/1"
+          }
+        ],
+        "format": {
+          "duration": "17.334000"
+        }
+      }
+    },
+    "mesh-retargeting.gif": {
+      "path": "docs/assets/demos/mesh-retargeting.gif",
+      "sha256": "72f9c4d507b3628935bb83a802f720d78f3ab4f1a257e1b83f2181ace2d1cb15",
+      "bytes": 1872654,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "gif",
+            "width": 768,
+            "height": 384,
+            "r_frame_rate": "10/1"
+          }
+        ],
+        "format": {
+          "duration": "7.000000"
+        }
+      }
+    },
+    "mesh-retargeting.mp4": {
+      "path": "docs/assets/demos/mesh-retargeting.mp4",
+      "sha256": "6b25b61cf90b6a9c01e2cf37820467d98b146c97158ddf96dcb920fa2acdc059",
+      "bytes": 497362,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 960,
+            "height": 480,
+            "r_frame_rate": "15/1"
+          }
+        ],
+        "format": {
+          "duration": "7.000000"
+        }
+      }
+    },
+    "readme-preview.png": {
+      "path": "docs/assets/demos/readme-preview.png",
+      "sha256": "43b46db54323016dd61723c95f688deb6a59d092615199c9594a7e3081dc2d25",
+      "bytes": 633900,
+      "kind": "local Markdown/Mermaid render; GIF frame captured during playback"
+    }
+  },
+  "edits": {
+    "hybrid": {
+      "saved_target_indices": [
+        0,
+        240
+      ],
+      "stride": 2,
+      "render_fps": 30,
+      "gif_fps": 15,
+      "new_inference": false,
+      "hardware": false
+    },
+    "viki": {
+      "start_s": 12.5,
+      "end_s": 21.5,
+      "crop": [
+        128,
+        140,
+        768,
+        768
+      ],
+      "mp4_fps": 24,
+      "gif_fps": 8,
+      "geometry_edited": false
+    },
+    "dexumr": {
+      "start_s": 4,
+      "end_s": 11,
+      "crop": [
+        0,
+        0,
+        960,
+        480
+      ],
+      "kind": "kinematic top row; not a dynamic grasp success",
+      "full_physics_comparison_preserved": true
+    }
+  },
+  "verification": {
+    "local_links": 32,
+    "old_command_and_structure_blocks_preserved": 23,
+    "animated_previews": 3,
+    "browser": "Chromium with markdown-it and Mermaid",
+    "page_errors": 0,
+    "new_training": false,
+    "new_reconstruction": false,
+    "physical_hardware_used": false
+  }
+}
