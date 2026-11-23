@@ -4,11 +4,6 @@
   "git_head_before_readme_change": "60f1e8ca578881e302a870618536c8f43d1a4071",
   "readme_before_sha256": "1e2907f54be0f550b287643bda8736346fc5607f5138269033b72b652494fabe",
   "sources": {
-    "hybrid_targets": {
-      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/debug_runs/acceleration_validation/retarget_after.npy",
-      "sha256": "477432e3486a24b148501ea829e011506c091b9b41a4eb02227a60342e4edf50",
-      "bytes": 83968
-    },
     "hybrid_landmarks": {
       "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/debug_runs/2026-09-28_18-30-01_157769/landmarks.jsonl",
       "sha256": "eab693f9d16ba977138cc0721b2adcf55263225189bcd5e6cafe3ed850f3076a",
@@ -28,6 +23,13 @@
       "path": "/home/yoba/Documents/work/DexUMR/output/feature/video/viki_compare.mp4",
       "sha256": "f1320f5bcf1eb1879ebb2a0fa051bafcb0bb29d7fcf644f846271df71bfbfdae",
       "bytes": 1836282
+    },
+    "hybrid_measured_joints": {
+      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/debug_runs/2026-09-28_18-30-01_157769/servo_ticks.jsonl",
+      "sha256": "466d38d51a65bbbcd8ebde501e98b761f308e865112eabe56b519390a7e9b3bb",
+      "bytes": 82467402,
+      "field": "q_measured",
+      "units": "degrees"
     }
   },
   "assets": {
@@ -76,13 +78,13 @@
     },
     "hybrid-poster.jpg": {
       "path": "docs/assets/demos/hybrid-poster.jpg",
-      "sha256": "989bb973ec6e5060bdd0f228d0e17a9c00f6e89c1cc766e1602b906475f40203",
-      "bytes": 21576
+      "sha256": "068a29511d8a71fe05b565073afdf970d0d9a0217f85f19837e1d3ddf26540c5",
+      "bytes": 42471
     },
     "hybrid-retargeting.gif": {
       "path": "docs/assets/demos/hybrid-retargeting.gif",
-      "sha256": "3f587e86315e8e03bf71fe72475742d468b09663aabcd36549a07beb6b97795e",
-      "bytes": 1268028,
+      "sha256": "193a3eb753225e04ed0daaac39d337d4a9e9064e77051ef0a29ce1333c20829d",
+      "bytes": 1592381,
       "media": {
         "programs": [],
         "streams": [
@@ -94,14 +96,14 @@
           }
         ],
         "format": {
-          "duration": "3.990000"
+          "duration": "6.590000"
         }
       }
     },
     "hybrid-retargeting.mp4": {
       "path": "docs/assets/demos/hybrid-retargeting.mp4",
-      "sha256": "2cfc82a784c8acb9eca0d49917d0881a80fc9e46f004144481d10f5ae95b4ee8",
-      "bytes": 221555,
+      "sha256": "aed26ebfcbe8b857b82f232aafb55336080cb91e710908e8db96505173d7418b",
+      "bytes": 303442,
       "media": {
         "programs": [],
         "streams": [
@@ -113,7 +115,7 @@
           }
         ],
         "format": {
-          "duration": "4.000000"
+          "duration": "6.600000"
         }
       }
     },
@@ -176,22 +178,58 @@
     },
     "readme-preview.png": {
       "path": "docs/assets/demos/readme-preview.png",
-      "sha256": "43b46db54323016dd61723c95f688deb6a59d092615199c9594a7e3081dc2d25",
-      "bytes": 633900,
+      "sha256": "9b6becac574ea9901ee1ad8b75dcee88ab64df2b54392d5ab46436e964354889",
+      "bytes": 639773,
       "kind": "local Markdown/Mermaid render; GIF frame captured during playback"
     }
   },
   "edits": {
     "hybrid": {
-      "saved_target_indices": [
-        0,
-        240
+      "recording": "debug_runs/2026-09-28_18-30-01_157769",
+      "interval_s": [
+        55.65,
+        62.25
       ],
-      "stride": 2,
-      "render_fps": 30,
+      "frame_count": 198,
+      "duration_s": 6.6,
+      "source_field": "servo_ticks.jsonl:q_measured",
+      "source_units": "degrees",
+      "render_units": "radians",
+      "kinematic_forward_only": true,
+      "no_new_retargeting": true,
+      "smoothing": false,
+      "speed": 1,
+      "sampling": "last recorded servo tick at or before each 30 Hz display time; nearest landmark receipt to last_landmarks_received_monotonic_s",
+      "matching": "same-host monotonic reception times, not exposure synchronization",
+      "max_landmark_match_error_ms": 14.869178001390537,
+      "max_servo_tick_gap_ms": 32.96148300069035,
+      "tracking_ok_all": true,
+      "source_tick_lines_inclusive": [
+        3144,
+        3538
+      ],
+      "max_joint_step_deg": 3.9000000953674316,
+      "p95_joint_step_deg": 2.6350028991699235,
+      "human_thumb_index_min_mm": 12.553408466902695,
+      "limitations": "MuJoCo playback of recorded measured joint angles, not raw Hybrid targets, new physical execution or proof of contact accuracy.",
+      "compared_candidate_count": 8,
+      "compared_recordings": [
+        "2026-09-28_15-39-45_90896",
+        "2026-09-28_18-05-11_146230",
+        "2026-09-28_18-30-01_157769"
+      ],
+      "selection_basis": "bounded search for pinch/open cycle, no tracking loss, low recorded angular steps, then visual inspection; not an exhaustive optimum",
+      "camera": {
+        "azimuth_deg": -90,
+        "elevation_deg": -12,
+        "distance_m": 0.44
+      },
+      "poster_time_s": 57.55,
       "gif_fps": 15,
+      "render_fps": 30,
+      "hardware": false,
       "new_inference": false,
-      "hardware": false
+      "selection_details": "docs/assets/demos/hybrid-pinch-selection.json"
     },
     "viki": {
       "start_s": 12.5,
@@ -227,6 +265,17 @@
     "page_errors": 0,
     "new_training": false,
     "new_reconstruction": false,
-    "physical_hardware_used": false
-  }
+    "physical_hardware_used": false,
+    "hybrid_update": {
+      "date": "2026-11-23",
+      "gif_frames": 99,
+      "gif_duration_s": 6.59,
+      "gif_loop": 0,
+      "unchanged_other_demos": true,
+      "source_tracking_ok_all": true,
+      "browser_check": "preview-check.json"
+    }
+  },
+  "updated_date": "2026-11-23",
+  "git_head_before_hybrid_update": "fc35e8b72d95b309b2e4403d3519920d1f60f9ee"
 }
