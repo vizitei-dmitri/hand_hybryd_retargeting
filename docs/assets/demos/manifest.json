@@ -1,0 +1,323 @@
+{
+  "date": "2026-11-20",
+  "repository": "git@github.com:vizitei-dmitri/hand_hybryd_retargeting.git",
+  "git_head_before_readme_change": "60f1e8ca578881e302a870618536c8f43d1a4071",
+  "readme_before_sha256": "1e2907f54be0f550b287643bda8736346fc5607f5138269033b72b652494fabe",
+  "sources": {
+    "hybrid_landmarks": {
+      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/debug_runs/2026-09-28_18-05-11_146230/landmarks.jsonl",
+      "sha256": "3276128d966f9d3cba83a1dc255ac55e0d479e3e30ae146780d6c933b8b627c9",
+      "bytes": 12796162
+    },
+    "hybrid_model": {
+      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/models/dg5f/dg5f_right.xml",
+      "sha256": "5b765c5276fdbccbba3e9ea145db2da2d6bedb68b9ea3e61056120e3ec07d253",
+      "bytes": 29744
+    },
+    "viki_video": {
+      "path": "/home/yoba/Videos/Screencasts/Screencast from 11-14-2026 03:29:47 PM.webm",
+      "sha256": "b63fedbd1cefa68bf16f08efb5fcdef800189f84f77e47846fb51f7782d4e1f6",
+      "bytes": 89130460
+    },
+    "dexumr_video": {
+      "path": "/home/yoba/Documents/work/DexUMR/output/feature/video/viki_compare.mp4",
+      "sha256": "f1320f5bcf1eb1879ebb2a0fa051bafcb0bb29d7fcf644f846271df71bfbfdae",
+      "bytes": 1836282
+    },
+    "hybrid_measured_joints": {
+      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/debug_runs/2026-09-28_18-05-11_146230/servo_ticks.jsonl",
+      "sha256": "42d47e38e3f2757c3aecdd08724a408aa96f689cf6d088a6666da797342a41e8",
+      "bytes": 108153167,
+      "field": "q_measured",
+      "units": "degrees"
+    }
+  },
+  "assets": {
+    "hand-object-poster.jpg": {
+      "path": "docs/assets/demos/hand-object-poster.jpg",
+      "sha256": "d38fd26de3e767abd8dbb3c806590f7a398fceb62e58007e334124dd880a9c2a",
+      "bytes": 47169
+    },
+    "hand-object-reconstruction.gif": {
+      "path": "docs/assets/demos/hand-object-reconstruction.gif",
+      "sha256": "9f7bce72aa2557d5ecbd745f0fefc6587f4114008236efbc01ea35459a458b3e",
+      "bytes": 4884078,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "gif",
+            "width": 400,
+            "height": 400,
+            "r_frame_rate": "8/1"
+          }
+        ],
+        "format": {
+          "duration": "9.010000"
+        }
+      }
+    },
+    "hand-object-reconstruction.mp4": {
+      "path": "docs/assets/demos/hand-object-reconstruction.mp4",
+      "sha256": "787ff46fd21dd2398d38ae9a03dd4c0d043fa383c7bd902b95b22a7539e77e7d",
+      "bytes": 5099615,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 640,
+            "height": 640,
+            "r_frame_rate": "24/1"
+          }
+        ],
+        "format": {
+          "duration": "9.000000"
+        }
+      }
+    },
+    "hybrid-poster.jpg": {
+      "path": "docs/assets/demos/hybrid-poster.jpg",
+      "sha256": "131da5b5189db22d5e5507c4c4e2c3b0715b233928a1b50196768ba0a9b13b55",
+      "bytes": 47993
+    },
+    "hybrid-retargeting.gif": {
+      "path": "docs/assets/demos/hybrid-retargeting.gif",
+      "sha256": "41b43d7e7362f944f53d0aec2b45855d665b03ab0585fc0235f3628b965aa713",
+      "bytes": 2208591,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "gif",
+            "width": 768,
+            "height": 446,
+            "r_frame_rate": "15/1"
+          }
+        ],
+        "format": {
+          "duration": "5.540000"
+        }
+      }
+    },
+    "hybrid-retargeting.mp4": {
+      "path": "docs/assets/demos/hybrid-retargeting.mp4",
+      "sha256": "7aeaaa54b133e7001db186462e5303ced1775c7c4a5062d694742eb0dca23b5f",
+      "bytes": 398926,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 896,
+            "height": 520,
+            "r_frame_rate": "30/1"
+          }
+        ],
+        "format": {
+          "duration": "5.500000"
+        }
+      }
+    },
+    "mesh-retargeting-physics.mp4": {
+      "path": "docs/assets/demos/mesh-retargeting-physics.mp4",
+      "sha256": "f1320f5bcf1eb1879ebb2a0fa051bafcb0bb29d7fcf644f846271df71bfbfdae",
+      "bytes": 1836282,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 960,
+            "height": 960,
+            "r_frame_rate": "15/1"
+          }
+        ],
+        "format": {
+          "duration": "17.334000"
+        }
+      }
+    },
+    "mesh-retargeting.gif": {
+      "path": "docs/assets/demos/mesh-retargeting.gif",
+      "sha256": "72f9c4d507b3628935bb83a802f720d78f3ab4f1a257e1b83f2181ace2d1cb15",
+      "bytes": 1872654,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "gif",
+            "width": 768,
+            "height": 384,
+            "r_frame_rate": "10/1"
+          }
+        ],
+        "format": {
+          "duration": "7.000000"
+        }
+      }
+    },
+    "mesh-retargeting.mp4": {
+      "path": "docs/assets/demos/mesh-retargeting.mp4",
+      "sha256": "6b25b61cf90b6a9c01e2cf37820467d98b146c97158ddf96dcb920fa2acdc059",
+      "bytes": 497362,
+      "media": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 960,
+            "height": 480,
+            "r_frame_rate": "15/1"
+          }
+        ],
+        "format": {
+          "duration": "7.000000"
+        }
+      }
+    },
+    "readme-preview.png": {
+      "path": "docs/assets/demos/readme-preview.png",
+      "sha256": "cabc39bd07aa3b8cab2bf40ab56b693405b77a99c5382da735e72d4962eff0f4",
+      "bytes": 675396,
+      "kind": "local Markdown/Mermaid render; GIF frame captured during playback"
+    }
+  },
+  "edits": {
+    "hybrid": {
+      "recording": "debug_runs/2026-09-28_18-05-11_146230",
+      "interval_s": [
+        22.4,
+        27.9
+      ],
+      "frame_count": 165,
+      "duration_s": 5.5,
+      "source_field": "servo_ticks.jsonl:q_measured",
+      "source_units": "degrees",
+      "render_units": "radians",
+      "kinematic_forward_only": true,
+      "no_new_retargeting": true,
+      "smoothing": false,
+      "speed": 1,
+      "sampling": "last recorded servo tick at or before each 30 Hz display time; nearest landmark receipt to last_landmarks_received_monotonic_s",
+      "matching": "same-host monotonic reception times, not exposure synchronization",
+      "max_landmark_match_error_ms": 10.592064998490969,
+      "max_servo_tick_gap_ms": 29.19209700121428,
+      "tracking_ok_all": true,
+      "source_tick_lines_inclusive": [
+        39,
+        369
+      ],
+      "max_joint_step_deg": 3.700000762939453,
+      "p95_joint_step_deg": 2.955000686645508,
+      "human_thumb_index_min_mm": 10.214063770032325,
+      "limitations": "MuJoCo playback of recorded measured joint angles, not raw Hybrid targets, new physical execution or proof of contact accuracy.",
+      "compared_candidate_count": 4,
+      "compared_recordings": [
+        "2026-09-28_15-39-45_90896",
+        "2026-09-28_18-05-11_146230",
+        "2026-09-28_18-30-01_157769"
+      ],
+      "selection_basis": "Search all four thumb-to-fingertip distances for consecutive distinct-finger pinches, compare four cycles, measured angular changes, FK distal-surface gaps and visual views; not an exhaustive optimum",
+      "camera": {
+        "azimuth_deg": 150,
+        "elevation_deg": -12,
+        "distance_m": 0.44
+      },
+      "poster_time_s": 24.8,
+      "pinch_fingers_in_order": [
+        "ring",
+        "middle",
+        "index"
+      ],
+      "repeated_index_pinch_in_tail": true,
+      "pinch_evidence": [
+        {
+          "finger": "ring",
+          "human_hold_interval_s": [
+            23.26,
+            23.86
+          ],
+          "fk_collision_proxy_gap_median_mm": 0.5
+        },
+        {
+          "finger": "middle",
+          "human_hold_interval_s": [
+            24.46,
+            25.21
+          ],
+          "fk_collision_proxy_gap_median_mm": -0.7
+        },
+        {
+          "finger": "index",
+          "human_hold_interval_s": [
+            25.66,
+            26.41
+          ],
+          "fk_collision_proxy_gap_median_mm": 0.1
+        }
+      ],
+      "pinch_evidence_note": "Model collision-proxy distances over human pinch samples (<30 mm), before 26.7s. They guide segment selection; they do not measure real skin contact or prove perfect retargeting.",
+      "gif_fps": 15,
+      "render_fps": 30,
+      "hardware": false,
+      "new_inference": false,
+      "selection_details": "docs/assets/demos/hybrid-pinch-selection.json"
+    },
+    "viki": {
+      "start_s": 12.5,
+      "end_s": 21.5,
+      "crop": [
+        128,
+        140,
+        768,
+        768
+      ],
+      "mp4_fps": 24,
+      "gif_fps": 8,
+      "geometry_edited": false
+    },
+    "dexumr": {
+      "start_s": 4,
+      "end_s": 11,
+      "crop": [
+        0,
+        0,
+        960,
+        480
+      ],
+      "kind": "kinematic top row; not a dynamic grasp success",
+      "full_physics_comparison_preserved": true
+    }
+  },
+  "verification": {
+    "local_links": 32,
+    "old_command_and_structure_blocks_preserved": 23,
+    "animated_previews": 3,
+    "browser": "Chromium with markdown-it and Mermaid",
+    "page_errors": 0,
+    "new_training": false,
+    "new_reconstruction": false,
+    "physical_hardware_used": false,
+    "hybrid_update": {
+      "date": "2026-11-23",
+      "gif_frames": 83,
+      "gif_duration_s": 5.54,
+      "gif_loop": 0,
+      "unchanged_other_demos": true,
+      "source_tracking_ok_all": true,
+      "browser_check": "preview-check.json"
+    }
+  },
+  "updated_date": "2026-11-23",
+  "git_head_before_hybrid_update": "10f20436783ed64a2f55a8229d5d087776a19cb7",
+  "publication_to_master": {
+    "date": "2026-11-23",
+    "source_branch": "feature/kinect-mano-hybrid-tracker",
+    "source_commit": "5d5e426713e58419db0e6587a7aec7ccb13f6420",
+    "master_base_commit": "3be4be81c31df353dfd3d90ca656ca7f619dabdc",
+    "scope": "README, existing demo assets and background documentation; implementation guides link to source branch; previous master overview preserved in docs/RESEARCH_OVERVIEW.md",
+    "checked_local_links": 22,
+    "browser_check": "preview-check.json"
+  }
+}
