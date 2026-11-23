@@ -5,9 +5,9 @@
   "readme_before_sha256": "1e2907f54be0f550b287643bda8736346fc5607f5138269033b72b652494fabe",
   "sources": {
     "hybrid_landmarks": {
-      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/debug_runs/2026-09-28_18-30-01_157769/landmarks.jsonl",
-      "sha256": "eab693f9d16ba977138cc0721b2adcf55263225189bcd5e6cafe3ed850f3076a",
-      "bytes": 7731396
+      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/debug_runs/2026-09-28_18-05-11_146230/landmarks.jsonl",
+      "sha256": "3276128d966f9d3cba83a1dc255ac55e0d479e3e30ae146780d6c933b8b627c9",
+      "bytes": 12796162
     },
     "hybrid_model": {
       "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/models/dg5f/dg5f_right.xml",
@@ -25,9 +25,9 @@
       "bytes": 1836282
     },
     "hybrid_measured_joints": {
-      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/debug_runs/2026-09-28_18-30-01_157769/servo_ticks.jsonl",
-      "sha256": "466d38d51a65bbbcd8ebde501e98b761f308e865112eabe56b519390a7e9b3bb",
-      "bytes": 82467402,
+      "path": "/home/yoba/Documents/work/hand_hybryd_retargeting/debug_runs/2026-09-28_18-05-11_146230/servo_ticks.jsonl",
+      "sha256": "42d47e38e3f2757c3aecdd08724a408aa96f689cf6d088a6666da797342a41e8",
+      "bytes": 108153167,
       "field": "q_measured",
       "units": "degrees"
     }
@@ -78,13 +78,13 @@
     },
     "hybrid-poster.jpg": {
       "path": "docs/assets/demos/hybrid-poster.jpg",
-      "sha256": "068a29511d8a71fe05b565073afdf970d0d9a0217f85f19837e1d3ddf26540c5",
-      "bytes": 42471
+      "sha256": "131da5b5189db22d5e5507c4c4e2c3b0715b233928a1b50196768ba0a9b13b55",
+      "bytes": 47993
     },
     "hybrid-retargeting.gif": {
       "path": "docs/assets/demos/hybrid-retargeting.gif",
-      "sha256": "193a3eb753225e04ed0daaac39d337d4a9e9064e77051ef0a29ce1333c20829d",
-      "bytes": 1592381,
+      "sha256": "41b43d7e7362f944f53d0aec2b45855d665b03ab0585fc0235f3628b965aa713",
+      "bytes": 2208591,
       "media": {
         "programs": [],
         "streams": [
@@ -96,14 +96,14 @@
           }
         ],
         "format": {
-          "duration": "6.590000"
+          "duration": "5.540000"
         }
       }
     },
     "hybrid-retargeting.mp4": {
       "path": "docs/assets/demos/hybrid-retargeting.mp4",
-      "sha256": "aed26ebfcbe8b857b82f232aafb55336080cb91e710908e8db96505173d7418b",
-      "bytes": 303442,
+      "sha256": "7aeaaa54b133e7001db186462e5303ced1775c7c4a5062d694742eb0dca23b5f",
+      "bytes": 398926,
       "media": {
         "programs": [],
         "streams": [
@@ -115,7 +115,7 @@
           }
         ],
         "format": {
-          "duration": "6.600000"
+          "duration": "5.500000"
         }
       }
     },
@@ -178,20 +178,20 @@
     },
     "readme-preview.png": {
       "path": "docs/assets/demos/readme-preview.png",
-      "sha256": "9b6becac574ea9901ee1ad8b75dcee88ab64df2b54392d5ab46436e964354889",
-      "bytes": 639773,
+      "sha256": "3f8e2c7252c3b89d4dd7201f4f2b0f18315c8013ffbf8bfab60852e71d30b1d7",
+      "bytes": 661668,
       "kind": "local Markdown/Mermaid render; GIF frame captured during playback"
     }
   },
   "edits": {
     "hybrid": {
-      "recording": "debug_runs/2026-09-28_18-30-01_157769",
+      "recording": "debug_runs/2026-09-28_18-05-11_146230",
       "interval_s": [
-        55.65,
-        62.25
+        22.4,
+        27.9
       ],
-      "frame_count": 198,
-      "duration_s": 6.6,
+      "frame_count": 165,
+      "duration_s": 5.5,
       "source_field": "servo_ticks.jsonl:q_measured",
       "source_units": "degrees",
       "render_units": "radians",
@@ -201,30 +201,63 @@
       "speed": 1,
       "sampling": "last recorded servo tick at or before each 30 Hz display time; nearest landmark receipt to last_landmarks_received_monotonic_s",
       "matching": "same-host monotonic reception times, not exposure synchronization",
-      "max_landmark_match_error_ms": 14.869178001390537,
-      "max_servo_tick_gap_ms": 32.96148300069035,
+      "max_landmark_match_error_ms": 10.592064998490969,
+      "max_servo_tick_gap_ms": 29.19209700121428,
       "tracking_ok_all": true,
       "source_tick_lines_inclusive": [
-        3144,
-        3538
+        39,
+        369
       ],
-      "max_joint_step_deg": 3.9000000953674316,
-      "p95_joint_step_deg": 2.6350028991699235,
-      "human_thumb_index_min_mm": 12.553408466902695,
+      "max_joint_step_deg": 3.700000762939453,
+      "p95_joint_step_deg": 2.955000686645508,
+      "human_thumb_index_min_mm": 10.214063770032325,
       "limitations": "MuJoCo playback of recorded measured joint angles, not raw Hybrid targets, new physical execution or proof of contact accuracy.",
-      "compared_candidate_count": 8,
+      "compared_candidate_count": 4,
       "compared_recordings": [
         "2026-09-28_15-39-45_90896",
         "2026-09-28_18-05-11_146230",
         "2026-09-28_18-30-01_157769"
       ],
-      "selection_basis": "bounded search for pinch/open cycle, no tracking loss, low recorded angular steps, then visual inspection; not an exhaustive optimum",
+      "selection_basis": "Search all four thumb-to-fingertip distances for consecutive distinct-finger pinches, compare four cycles, measured angular changes, FK distal-surface gaps and visual views; not an exhaustive optimum",
       "camera": {
-        "azimuth_deg": -90,
+        "azimuth_deg": 150,
         "elevation_deg": -12,
         "distance_m": 0.44
       },
-      "poster_time_s": 57.55,
+      "poster_time_s": 24.8,
+      "pinch_fingers_in_order": [
+        "ring",
+        "middle",
+        "index"
+      ],
+      "repeated_index_pinch_in_tail": true,
+      "pinch_evidence": [
+        {
+          "finger": "ring",
+          "human_hold_interval_s": [
+            23.26,
+            23.86
+          ],
+          "fk_collision_proxy_gap_median_mm": 0.5
+        },
+        {
+          "finger": "middle",
+          "human_hold_interval_s": [
+            24.46,
+            25.21
+          ],
+          "fk_collision_proxy_gap_median_mm": -0.7
+        },
+        {
+          "finger": "index",
+          "human_hold_interval_s": [
+            25.66,
+            26.41
+          ],
+          "fk_collision_proxy_gap_median_mm": 0.1
+        }
+      ],
+      "pinch_evidence_note": "Model collision-proxy distances over human pinch samples (<30 mm), before 26.7s. They guide segment selection; they do not measure real skin contact or prove perfect retargeting.",
       "gif_fps": 15,
       "render_fps": 30,
       "hardware": false,
@@ -268,8 +301,8 @@
     "physical_hardware_used": false,
     "hybrid_update": {
       "date": "2026-11-23",
-      "gif_frames": 99,
-      "gif_duration_s": 6.59,
+      "gif_frames": 83,
+      "gif_duration_s": 5.54,
       "gif_loop": 0,
       "unchanged_other_demos": true,
       "source_tracking_ok_all": true,
@@ -277,5 +310,5 @@
     }
   },
   "updated_date": "2026-11-23",
-  "git_head_before_hybrid_update": "fc35e8b72d95b309b2e4403d3519920d1f60f9ee"
+  "git_head_before_hybrid_update": "10f20436783ed64a2f55a8229d5d087776a19cb7"
 }

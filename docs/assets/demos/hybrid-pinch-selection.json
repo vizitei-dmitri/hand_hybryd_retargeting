@@ -1,11 +1,11 @@
 {
-  "recording": "debug_runs/2026-09-28_18-30-01_157769",
+  "recording": "debug_runs/2026-09-28_18-05-11_146230",
   "interval_s": [
-    55.65,
-    62.25
+    22.4,
+    27.9
   ],
-  "frame_count": 198,
-  "duration_s": 6.6,
+  "frame_count": 165,
+  "duration_s": 5.5,
   "source_field": "servo_ticks.jsonl:q_measured",
   "source_units": "degrees",
   "render_units": "radians",
@@ -15,28 +15,61 @@
   "speed": 1,
   "sampling": "last recorded servo tick at or before each 30 Hz display time; nearest landmark receipt to last_landmarks_received_monotonic_s",
   "matching": "same-host monotonic reception times, not exposure synchronization",
-  "max_landmark_match_error_ms": 14.869178001390537,
-  "max_servo_tick_gap_ms": 32.96148300069035,
+  "max_landmark_match_error_ms": 10.592064998490969,
+  "max_servo_tick_gap_ms": 29.19209700121428,
   "tracking_ok_all": true,
   "source_tick_lines_inclusive": [
-    3144,
-    3538
+    39,
+    369
   ],
-  "max_joint_step_deg": 3.9000000953674316,
-  "p95_joint_step_deg": 2.6350028991699235,
-  "human_thumb_index_min_mm": 12.553408466902695,
+  "max_joint_step_deg": 3.700000762939453,
+  "p95_joint_step_deg": 2.955000686645508,
+  "human_thumb_index_min_mm": 10.214063770032325,
   "limitations": "MuJoCo playback of recorded measured joint angles, not raw Hybrid targets, new physical execution or proof of contact accuracy.",
-  "compared_candidate_count": 8,
+  "compared_candidate_count": 4,
   "compared_recordings": [
     "2026-09-28_15-39-45_90896",
     "2026-09-28_18-05-11_146230",
     "2026-09-28_18-30-01_157769"
   ],
-  "selection_basis": "bounded search for pinch/open cycle, no tracking loss, low recorded angular steps, then visual inspection; not an exhaustive optimum",
+  "selection_basis": "Search all four thumb-to-fingertip distances for consecutive distinct-finger pinches, compare four cycles, measured angular changes, FK distal-surface gaps and visual views; not an exhaustive optimum",
   "camera": {
-    "azimuth_deg": -90,
+    "azimuth_deg": 150,
     "elevation_deg": -12,
     "distance_m": 0.44
   },
-  "poster_time_s": 57.55
+  "poster_time_s": 24.8,
+  "pinch_fingers_in_order": [
+    "ring",
+    "middle",
+    "index"
+  ],
+  "repeated_index_pinch_in_tail": true,
+  "pinch_evidence": [
+    {
+      "finger": "ring",
+      "human_hold_interval_s": [
+        23.26,
+        23.86
+      ],
+      "fk_collision_proxy_gap_median_mm": 0.5
+    },
+    {
+      "finger": "middle",
+      "human_hold_interval_s": [
+        24.46,
+        25.21
+      ],
+      "fk_collision_proxy_gap_median_mm": -0.7
+    },
+    {
+      "finger": "index",
+      "human_hold_interval_s": [
+        25.66,
+        26.41
+      ],
+      "fk_collision_proxy_gap_median_mm": 0.1
+    }
+  ],
+  "pinch_evidence_note": "Model collision-proxy distances over human pinch samples (<30 mm), before 26.7s. They guide segment selection; they do not measure real skin contact or prove perfect retargeting."
 }

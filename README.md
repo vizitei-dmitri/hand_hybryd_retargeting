@@ -25,9 +25,9 @@ flowchart LR
 
 Vector сохраняет форму пальцев. При сближении большого пальца с остальными плавно подключается коррекция щипка. Результат используется для телеуправления, просмотра в MuJoCo и записи демонстраций.
 
-[![Щипок: записанное движение человека и DG5F после Hybrid и Servo](docs/assets/demos/hybrid-retargeting.gif)](docs/assets/demos/hybrid-retargeting.mp4)
+[![Щипки разными пальцами: записанное движение человека и DG5F после Hybrid и Servo](docs/assets/demos/hybrid-retargeting.gif)](docs/assets/demos/hybrid-retargeting.mp4)
 
-<sub>Щипок: смыкание → удержание → раскрытие. Слева — записанные точки кисти, справа — измеренные углы DG5F после Hybrid + Servo, воспроизведённые в MuJoCo. Исходный темп, без дополнительного сглаживания. [Смотреть MP4](docs/assets/demos/hybrid-retargeting.mp4).</sub>
+<sub>Серия щипков: большой палец с безымянным → средним → указательным. Слева — записанные точки кисти, справа — измеренные углы DG5F после Hybrid + Servo, воспроизведённые в MuJoCo. Исходный темп, без дополнительного сглаживания. [Смотреть MP4](docs/assets/demos/hybrid-retargeting.mp4).</sub>
 
 [Код ретаргетинга](src/dg5f_teleop/dg5f_teleop/retarget_node.py) · [Управление физической кистью](docs/DG5F_SERVO_RUNTIME_POLICY.md)
 
